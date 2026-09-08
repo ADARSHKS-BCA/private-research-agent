@@ -1,0 +1,12 @@
+python-dotenv
+requests
+qdrant-client
+ollama
+firecrawl-py
+fastembed
+sentence-transformers
+pydantic
+pydantic-settings
+pytest
+tiktoken
+groq

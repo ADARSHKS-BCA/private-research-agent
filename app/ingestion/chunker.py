@@ -101,10 +101,10 @@ class StructureAwareChunker:
         url = getattr(doc, "url", "")
         title = getattr(doc, "title", "Untitled")
         domain = getattr(doc, "domain", "")
-        source_type = getattr(doc, "source_type", "web")
+        doc_metadata = getattr(doc, "metadata", {}) or {}
+        source_type = getattr(doc, "source_type", None) or doc_metadata.get("source_type", "web")
         content_hash = getattr(doc, "content_hash", "")
         crawled_at = getattr(doc, "crawled_at", "")
-        doc_metadata = getattr(doc, "metadata", {}) or {}
 
         # Content field could be cleaned_markdown or markdown
         markdown_text = getattr(doc, "cleaned_markdown", None) or getattr(doc, "markdown", "")

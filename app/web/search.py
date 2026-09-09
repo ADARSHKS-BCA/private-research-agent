@@ -43,6 +43,16 @@ def search_with_rest_api(query: str, api_key: str, limit: int = 5) -> List[Dict[
         return []
 
 
+def get_firecrawl_client(api_key: Optional[str] = None):
+    key = api_key or os.getenv("FIRECRAWL_API_KEY")
+    try:
+        from firecrawl import FirecrawlApp
+        return FirecrawlApp(api_key=key)
+    except (ImportError, AttributeError):
+        from firecrawl import Firecrawl
+        return Firecrawl(api_key=key)
+
+
 def search_web(query: str, limit: int = 5) -> List[Dict[str, Any]]:
     """
     Search the web using Firecrawl Search API.
@@ -66,13 +76,7 @@ def search_web(query: str, limit: int = 5) -> List[Dict[str, Any]]:
 
     # Strategy 1: Try Firecrawl Python SDK
     try:
-        client = None
-        try:
-            from firecrawl import FirecrawlApp
-            client = FirecrawlApp(api_key=api_key)
-        except (ImportError, AttributeError):
-            from firecrawl import Firecrawl
-            client = Firecrawl(api_key=api_key)
+        client = get_firecrawl_client(api_key=api_key)
 
         if hasattr(client, "search"):
             try:

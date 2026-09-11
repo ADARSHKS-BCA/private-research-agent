@@ -12,3 +12,5 @@ tiktoken
 groq
 langgraph
 langchain-core
+fastapi
+uvicorn

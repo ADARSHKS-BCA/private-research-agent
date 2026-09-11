@@ -79,3 +79,6 @@ coverage.xml
 ehthumbs.db
 Thumbs.db
 desktop.ini
+
+
+node_modules/

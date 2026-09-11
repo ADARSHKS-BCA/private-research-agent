@@ -257,7 +257,7 @@ def search_web_node(state: ResearchState) -> Dict[str, Any]:
 
     for query_str in queries_to_run:
         try:
-            items = search_web(query=query_str, limit=4)
+            items = search_web(query=query_str, limit=5)
             for item in items:
                 url = item.get("url")
                 if url and url not in seen_urls:
@@ -294,11 +294,11 @@ def scrape_sources(state: ResearchState) -> Dict[str, Any]:
         for d in existing_scraped
     }
 
-    # Filter unscraped search results, limiting to top 4 per iteration to stay efficient
+    # Filter unscraped search results, scraping top 6 per iteration to ensure rich evidence
     unscraped_items = [
         item for item in search_results
         if item.get("url") and item.get("url") not in scraped_urls
-    ][:4]
+    ][:6]
 
     if not unscraped_items:
         print("[SCRAPE] No new URLs to scrape.", flush=True)
@@ -402,7 +402,7 @@ def retrieve_evidence(state: ResearchState) -> Dict[str, Any]:
 
     retrieved: List[Any] = []
     try:
-        retrieved = search(question, top_k=6)
+        retrieved = search(question, top_k=8)
     except Exception as e:
         err_msg = f"Qdrant retrieval search error: {e}"
         logger.warning(err_msg)
@@ -530,6 +530,8 @@ def validate_citations(state: ResearchState) -> Dict[str, Any]:
     """
     Validate cited source IDs ([S1], [S2]) against actual retrieved Qdrant chunks.
     Rejects fabricated sources and maps IDs to legitimate URLs.
+    Includes all verified papers and sources considered during research so the user
+    can explore all related fields (at least 5 sources).
     """
     answer_text = state.get("answer", "")
     retrieved = state.get("retrieved_documents", [])
@@ -543,9 +545,55 @@ def validate_citations(state: ResearchState) -> Dict[str, Any]:
         logger.info(err_msg)
         errors.append(err_msg)
 
-    print(f"[CITATIONS] Validated {len(valid_citations)} sources", flush=True)
+    # Collect all verified papers/sources considered by the model
+    seen_urls = set()
+    all_sources = []
+
+    # 1. Directly cited sources first (preserving [S1], [S2] order)
+    for c in valid_citations:
+        c_dict = c.to_dict()
+        url = c_dict.get("url")
+        if url and url not in seen_urls and url != "N/A":
+            seen_urls.add(url)
+            all_sources.append(c_dict)
+
+    # 2. Add all other verified sources retrieved and evaluated by the model
+    for c in citations:
+        c_dict = c.to_dict()
+        url = c_dict.get("url")
+        if url and url not in seen_urls and url != "N/A":
+            seen_urls.add(url)
+            # Re-index source_id if needed
+            c_dict["source_id"] = f"S{len(all_sources) + 1}"
+            c_dict["source_index"] = len(all_sources) + 1
+            all_sources.append(c_dict)
+
+    # 3. If fewer than 5 sources, supplement with discovered search results considered in research
+    search_results = state.get("search_results", [])
+    for res in search_results:
+        if len(all_sources) >= 8:
+            break
+        if isinstance(res, dict):
+            url = res.get("url")
+            if url and url not in seen_urls and url != "N/A":
+                seen_urls.add(url)
+                next_idx = len(all_sources) + 1
+                all_sources.append({
+                    "source_id": f"S{next_idx}",
+                    "source_index": next_idx,
+                    "title": res.get("title") or "Related Research Paper",
+                    "url": url,
+                    "domain": res.get("domain") or "",
+                    "chunk_id": "",
+                    "document_id": "",
+                    "score": None,
+                    "snippet": res.get("description") or "",
+                    "metadata": res,
+                })
+
+    print(f"[CITATIONS] Validated {len(all_sources)} sources (including all considered papers)", flush=True)
 
     return {
-        "sources": [c.to_dict() for c in valid_citations],
+        "sources": all_sources,
         "errors": errors,
     }

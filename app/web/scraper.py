@@ -1,9 +1,13 @@
 import argparse
+import concurrent.futures
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
+import hashlib
+import logging
 import os
 from pathlib import Path
 import sys
+import time
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 from dotenv import load_dotenv
@@ -14,10 +18,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from app.config import settings
 from app.web.search import search_web
 
 # Load environment variables
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -25,15 +31,34 @@ class ScrapedWebDocument:
     url: str
     title: str
     markdown: str
+    document_id: str = ""
     description: str = ""
     domain: str = ""
     crawled_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     success: bool = True
     error: Optional[str] = None
+    raw_file_path: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+
+# Alias for backward compatibility with ingestion.scraper
+ScrapedDocument = ScrapedWebDocument
+
+
+def generate_document_id(url: str) -> str:
+    """
+    Generate a deterministic, unique document ID based on normalized URL.
+    This guarantees idempotent document references across pipeline runs.
+    """
+    parsed = urlparse(url.strip())
+    normalized = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{parsed.path.rstrip('/')}"
+    if parsed.query:
+        normalized += f"?{parsed.query}"
+    url_hash = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+    return f"doc_{url_hash}"
 
 
 def extract_domain(url: str) -> str:
@@ -47,7 +72,7 @@ def extract_domain(url: str) -> str:
 
 def get_firecrawl_client(api_key: Optional[str] = None):
     """Get initialized Firecrawl client."""
-    key = api_key or os.getenv("FIRECRAWL_API_KEY")
+    key = api_key or settings.firecrawl_api_key or os.getenv("FIRECRAWL_API_KEY")
     if not key:
         raise ValueError("FIRECRAWL_API_KEY is not set in .env")
 
@@ -78,6 +103,8 @@ def scrape_with_rest_api(url: str, api_key: str, timeout: int = 30) -> Dict[str,
         data = resp.json()
         if isinstance(data, dict):
             return data.get("data", {}) or data
+    elif resp.status_code == 429:
+        raise requests.exceptions.HTTPError(f"HTTP 429 Too Many Requests from Firecrawl API")
     return {}
 
 
@@ -85,33 +112,43 @@ def scrape_url(
     url: str,
     description: str = "",
     title_hint: str = "",
-    timeout: int = 30,
+    timeout: Optional[int] = None,
+    save_dir: Optional[Path] = None,
+    client_override: Optional[Any] = None,
+    max_retries: Optional[int] = None,
 ) -> ScrapedWebDocument:
     """
-    Scrape a single URL and return a structured ScrapedWebDocument.
-    Isolates errors so individual failure does not raise an exception.
+    Scrape a single URL with retry and exponential backoff.
+    Returns a structured ScrapedWebDocument.
+    Isolates errors so individual failure does not raise an unhandled exception.
     """
     clean_url = url.strip()
     domain = extract_domain(clean_url)
     crawled_at = datetime.now(timezone.utc).isoformat()
+    req_timeout = timeout or settings.request_timeout
+    retries = max_retries if max_retries is not None else settings.max_retries
 
     if not clean_url:
         return ScrapedWebDocument(
             url="",
             title="",
             markdown="",
+            document_id="",
             domain="",
             crawled_at=crawled_at,
             success=False,
             error="Empty URL provided",
         )
 
-    api_key = os.getenv("FIRECRAWL_API_KEY")
-    if not api_key:
+    doc_id = generate_document_id(clean_url)
+    api_key = settings.firecrawl_api_key or os.getenv("FIRECRAWL_API_KEY", "")
+
+    if not api_key and client_override is None:
         return ScrapedWebDocument(
             url=clean_url,
             title=title_hint or "Untitled",
             markdown="",
+            document_id=doc_id,
             description=description,
             domain=domain,
             crawled_at=crawled_at,
@@ -123,78 +160,79 @@ def scrape_url(
     title = title_hint
     extracted_desc = description
     meta: Dict[str, Any] = {}
+    last_err: Optional[Exception] = None
 
-    # Strategy 1: Try Python SDK
-    try:
-        client = get_firecrawl_client(api_key=api_key)
-        scrape_res = None
-
-        if hasattr(client, "scrape"):
-            try:
-                scrape_res = client.scrape(clean_url, formats=["markdown"])
-            except TypeError:
-                scrape_res = client.scrape(clean_url)
-        elif hasattr(client, "scrape_url"):
-            scrape_res = client.scrape_url(clean_url, params={"formats": ["markdown"]})
-
-        if scrape_res is not None:
-            if hasattr(scrape_res, "model_dump"):
-                scrape_res = scrape_res.model_dump()
-            elif hasattr(scrape_res, "dict"):
-                scrape_res = scrape_res.dict()
-
-            if isinstance(scrape_res, dict):
-                raw_markdown = scrape_res.get("markdown", "") or ""
-                metadata_dict = scrape_res.get("metadata", {}) or {}
-                if isinstance(metadata_dict, dict):
-                    title = metadata_dict.get("title", "") or title
-                    extracted_desc = metadata_dict.get("description", "") or extracted_desc
-                    meta = metadata_dict
-                if not title:
-                    title = scrape_res.get("title", "") or title
-            else:
-                raw_markdown = str(getattr(scrape_res, "markdown", None) or "")
-                title = str(getattr(scrape_res, "title", None) or title)
-                meta_attr = getattr(scrape_res, "metadata", None)
-                if meta_attr:
-                    meta = meta_attr if isinstance(meta_attr, dict) else getattr(meta_attr, "__dict__", {})
-    except Exception as e:
-        # SDK error, proceed to REST fallback
-        raw_markdown = ""
-
-    # Strategy 2: Direct REST fallback if SDK returned empty markdown
-    if not raw_markdown:
+    for attempt in range(1, retries + 2):
         try:
-            rest_data = scrape_with_rest_api(clean_url, api_key=api_key, timeout=timeout)
-            if rest_data:
-                raw_markdown = rest_data.get("markdown", "") or ""
-                m = rest_data.get("metadata", {})
-                if isinstance(m, dict):
-                    title = m.get("title", "") or title
-                    extracted_desc = m.get("description", "") or extracted_desc
-                    meta = m
+            # Strategy 1: Try Firecrawl Client (either injected/mocked or standard)
+            client = client_override if client_override is not None else get_firecrawl_client(api_key=api_key)
+            scrape_res = None
+
+            if hasattr(client, "scrape"):
+                try:
+                    scrape_res = client.scrape(clean_url, formats=["markdown"])
+                except TypeError:
+                    scrape_res = client.scrape(clean_url)
+            elif hasattr(client, "scrape_url"):
+                scrape_res = client.scrape_url(clean_url, params={"formats": ["markdown"]})
+
+            if scrape_res is not None:
+                if hasattr(scrape_res, "model_dump"):
+                    scrape_res = scrape_res.model_dump()
+                elif hasattr(scrape_res, "dict"):
+                    scrape_res = scrape_res.dict()
+
+                if isinstance(scrape_res, dict):
+                    raw_markdown = scrape_res.get("markdown", "") or ""
+                    metadata_dict = scrape_res.get("metadata", {}) or {}
+                    if isinstance(metadata_dict, dict):
+                        title = metadata_dict.get("title", "") or title
+                        extracted_desc = metadata_dict.get("description", "") or extracted_desc
+                        meta = metadata_dict
+                    if not title:
+                        title = scrape_res.get("title", "") or title
+                else:
+                    raw_markdown = str(getattr(scrape_res, "markdown", None) or "")
+                    title = str(getattr(scrape_res, "title", None) or title)
+                    meta_attr = getattr(scrape_res, "metadata", None)
+                    if meta_attr:
+                        meta = meta_attr if isinstance(meta_attr, dict) else getattr(meta_attr, "__dict__", {})
+
+            # Strategy 2: Direct REST fallback if client gave empty markdown and no client override
+            if not raw_markdown and client_override is None and api_key:
+                rest_data = scrape_with_rest_api(clean_url, api_key=api_key, timeout=req_timeout)
+                if rest_data:
+                    raw_markdown = rest_data.get("markdown", "") or ""
+                    m = rest_data.get("metadata", {})
+                    if isinstance(m, dict):
+                        title = m.get("title", "") or title
+                        extracted_desc = m.get("description", "") or extracted_desc
+                        meta = m
+
+            if raw_markdown:
+                break
+
         except Exception as e:
-            return ScrapedWebDocument(
-                url=clean_url,
-                title=title or domain,
-                markdown="",
-                description=description,
-                domain=domain,
-                crawled_at=crawled_at,
-                success=False,
-                error=f"Scraping failed: {e}",
-            )
+            last_err = e
+            if attempt <= retries:
+                backoff_wait = 1.5 ** attempt
+                logger.warning(f"Scrape retry {attempt}/{retries} for {clean_url} after {backoff_wait:.1f}s: {e}")
+                time.sleep(backoff_wait)
+                continue
+            break
 
     if not raw_markdown:
+        err_msg = str(last_err) if last_err else "No markdown content retrieved from target webpage"
         return ScrapedWebDocument(
             url=clean_url,
             title=title or domain,
             markdown="",
+            document_id=doc_id,
             description=description,
             domain=domain,
             crawled_at=crawled_at,
             success=False,
-            error="No markdown content retrieved from target webpage",
+            error=err_msg,
         )
 
     # Fallback title if missing
@@ -205,137 +243,178 @@ def scrape_url(
                 title = s.lstrip("#").strip()
                 break
         if not title:
-            title = domain
+            title = domain or "Untitled Web Source"
+
+    # Save raw markdown file under data/raw/<document_id>.md
+    target_dir = Path(save_dir or settings.data_raw_dir)
+    raw_file_path = None
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        out_file = target_dir / f"{doc_id}.md"
+        out_file.write_text(raw_markdown, encoding="utf-8")
+        raw_file_path = str(out_file)
+    except Exception as e:
+        logger.warning(f"Could not persist raw markdown for {doc_id}: {e}")
 
     return ScrapedWebDocument(
         url=clean_url,
         title=title,
         markdown=raw_markdown,
+        document_id=doc_id,
         description=extracted_desc,
         domain=domain,
         crawled_at=crawled_at,
         success=True,
         error=None,
+        raw_file_path=raw_file_path,
         metadata=meta,
     )
 
 
-def scrape_urls(urls: List[str], timeout: int = 30) -> List[ScrapedWebDocument]:
+def scrape_urls(
+    urls: List[str],
+    timeout: Optional[int] = None,
+    max_workers: Optional[int] = None,
+) -> List[ScrapedWebDocument]:
     """
-    Scrape multiple URLs sequentially with error isolation.
+    Scrape multiple URLs concurrently with error isolation, maintaining original input order.
     """
-    scraped_docs: List[ScrapedWebDocument] = []
-    total = len(urls)
+    if not urls:
+        return []
 
-    for i, url in enumerate(urls, start=1):
-        print(f"[{i}/{total}] Scraping: {url} ...")
-        doc = scrape_url(url=url, timeout=timeout)
-        if doc.success:
-            print(f"       Success: {len(doc.markdown)} chars scraped ('{doc.title}')")
-        else:
-            print(f"       Failed:  {doc.error}")
-        scraped_docs.append(doc)
+    workers = max_workers or settings.max_concurrent_scrapes or 5
+    workers = max(1, min(workers, len(urls)))
+    req_timeout = timeout or settings.request_timeout
 
-    return scraped_docs
+    results: List[Optional[ScrapedWebDocument]] = [None] * len(urls)
+
+    def _worker(idx_url_tuple):
+        idx, target_url = idx_url_tuple
+        try:
+            return idx, scrape_url(url=target_url, timeout=req_timeout)
+        except Exception as ex:
+            return idx, ScrapedWebDocument(
+                url=target_url,
+                title="Untitled",
+                markdown="",
+                domain=extract_domain(target_url),
+                success=False,
+                error=str(ex),
+            )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(_worker, (i, url)) for i, url in enumerate(urls)]
+        for future in concurrent.futures.as_completed(futures):
+            idx, doc = future.result()
+            results[idx] = doc
+
+    return [d for d in results if d is not None]
 
 
-def scrape_search_results(search_results: List[Dict[str, Any]], timeout: int = 30) -> List[ScrapedWebDocument]:
+def scrape_search_results(
+    search_results: List[Dict[str, Any]],
+    timeout: Optional[int] = None,
+    max_workers: Optional[int] = None,
+) -> List[ScrapedWebDocument]:
     """
-    Scrape all URLs from a list of search result dictionaries (from Stage 6).
-    Preserves original title and description hints from search.
+    Scrape all URLs from search result dictionaries concurrently, preserving original ordering.
     """
-    scraped_docs: List[ScrapedWebDocument] = []
-    total = len(search_results)
+    if not search_results:
+        return []
 
-    for i, item in enumerate(search_results, start=1):
-        url = item.get("url", "").strip()
-        title_hint = item.get("title", "")
-        description_hint = item.get("description", "")
+    workers = max_workers or settings.max_concurrent_scrapes or 5
+    workers = max(1, min(workers, len(search_results)))
+    req_timeout = timeout or settings.request_timeout
 
+    results: List[Optional[ScrapedWebDocument]] = [None] * len(search_results)
+
+    def _worker(item_tuple):
+        idx, item = item_tuple
+        url = item.get("url", "").strip() if isinstance(item, dict) else ""
+        title_hint = item.get("title", "") if isinstance(item, dict) else ""
+        desc_hint = item.get("description", "") if isinstance(item, dict) else ""
         if not url:
-            continue
+            return idx, None
+        try:
+            doc = scrape_url(
+                url=url,
+                description=desc_hint,
+                title_hint=title_hint,
+                timeout=req_timeout,
+            )
+            return idx, doc
+        except Exception as ex:
+            return idx, ScrapedWebDocument(
+                url=url,
+                title=title_hint or "Untitled",
+                markdown="",
+                domain=extract_domain(url),
+                success=False,
+                error=str(ex),
+            )
 
-        print(f"[{i}/{total}] Scraping: {url}")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(_worker, (i, item)) for i, item in enumerate(search_results)]
+        for future in concurrent.futures.as_completed(futures):
+            idx, doc = future.result()
+            results[idx] = doc
+
+    return [d for d in results if d is not None]
+
+
+class Scraper:
+    """
+    Canonical Scraper class interface for pipeline integration and backward compatibility.
+    """
+    def __init__(self, api_key: Optional[str] = None, save_dir: Optional[Path] = None):
+        self.api_key = api_key or settings.firecrawl_api_key or os.getenv("FIRECRAWL_API_KEY", "")
+        self.save_dir = Path(save_dir or settings.data_raw_dir)
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+        self._client = None
+
+    def scrape_url(self, url: str) -> ScrapedWebDocument:
+        """Scrape a URL and save raw markdown to disk."""
         doc = scrape_url(
             url=url,
-            description=description_hint,
-            title_hint=title_hint,
-            timeout=timeout,
+            save_dir=self.save_dir,
+            client_override=self._client,
         )
-
-        if doc.success:
-            print(f"       ✓ {len(doc.markdown)} chars ('{doc.title}')")
-        else:
-            print(f"       ✗ {doc.error}")
-
-        scraped_docs.append(doc)
-
-    return scraped_docs
+        if not doc.success and doc.error:
+            # Maintain backward compatibility with tests expecting RuntimeError on failure
+            raise RuntimeError(f"Scraping failed: {doc.error}")
+        return doc
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Firecrawl Dynamic Multi-URL Scraper (Stage 7)")
+    parser = argparse.ArgumentParser(description="Canonical Multi-URL Web Scraper with Concurrency")
     parser.add_argument("--query", type=str, help="Search query to discover and scrape URLs", default=None)
     parser.add_argument("--urls", nargs="+", help="Explicit list of URLs to scrape", default=None)
-    parser.add_argument("--limit", type=int, help="Maximum number of URLs to scrape", default=3)
+    parser.add_argument("--limit", type=int, help="Maximum number of URLs to scrape", default=4)
     args = parser.parse_args()
 
     print("=" * 70)
-    print("  Private Research Agent - Dynamic URL Scraper (Stage 7)")
+    print("  Private Research Agent - Parallel Web Scraper")
     print("=" * 70)
 
-    urls_to_scrape: List[str] = []
-    search_items: List[Dict[str, Any]] = []
-
     if args.urls:
-        urls_to_scrape = args.urls[:args.limit]
+        urls = args.urls[:args.limit]
+        print(f"Scraping {len(urls)} URLs in parallel...")
+        docs = scrape_urls(urls)
     else:
-        query = args.query
-        if not query:
-            query = input("\nWhat research topic do you want to scrape? ").strip()
-
+        query = args.query or input("\nWhat research topic do you want to scrape? ").strip()
         if not query:
             print("Empty query. Exiting.")
             return
-
-        print(f"\n[Search] Discovering top {args.limit} URLs for '{query}'...")
+        print(f"\n[Search] Discovering URLs for '{query}'...")
         search_items = search_web(query=query, limit=args.limit)
-
-        if not search_items:
-            print("No URLs discovered for this query. Exiting.")
-            return
-
-        print(f"Found {len(search_items)} URLs. Starting multi-page scraping...\n")
-
-    # Perform scraping
-    if search_items:
+        print(f"Discovered {len(search_items)} URLs. Scraping in parallel...")
         docs = scrape_search_results(search_items)
-    else:
-        docs = scrape_urls(urls_to_scrape)
-
-    # Display results summary
-    print("\n" + "=" * 70)
-    print("SCRAPING SUMMARY:")
-    print("=" * 70)
 
     successful = [d for d in docs if d.success]
-    failed = [d for d in docs if not d.success]
-
-    print(f"Total Scraped: {len(docs)} | Successful: {len(successful)} | Failed: {len(failed)}\n")
-
-    for i, doc in enumerate(docs, start=1):
+    print(f"\nScraped {len(successful)}/{len(docs)} URLs successfully.")
+    for idx, doc in enumerate(docs, start=1):
         status = "SUCCESS" if doc.success else "FAILED"
-        print(f"[{i}] [{status}] {doc.title}")
-        print(f"    URL:        {doc.url}")
-        print(f"    Domain:     {doc.domain}")
-        print(f"    Characters: {len(doc.markdown)} chars")
-        if doc.error:
-            print(f"    Error:      {doc.error}")
-        else:
-            # Preview first 150 characters of raw markdown
-            preview = doc.markdown[:150].replace("\n", " ").strip()
-            print(f"    Preview:    {preview}...")
-        print()
+        print(f"[{idx}] [{status}] {doc.title} ({doc.url})")
 
 
 if __name__ == "__main__":

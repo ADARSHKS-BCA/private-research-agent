@@ -22,11 +22,28 @@ QDRANT_PORT = settings.qdrant_port
 QDRANT_COLLECTION = settings.qdrant_collection
 EMBEDDING_MODEL = settings.embedding_model
 
-# Connect to Qdrant
-client = QdrantClient(
-    host=QDRANT_HOST,
-    port=QDRANT_PORT,
-)
+_client = None
+
+
+def get_client() -> QdrantClient:
+    """Lazily get or create Qdrant client instance."""
+    global client, _client
+    if client is not None and not isinstance(client, _LazyClient):
+        return client
+    if _client is None:
+        _client = QdrantClient(host=settings.qdrant_host, port=settings.qdrant_port)
+    return _client
+
+
+class _LazyClient:
+    """Lazy proxy so client is not created at module import time, preserving test mockability."""
+    def __getattr__(self, name):
+        real_client = get_client()
+        return getattr(real_client, name)
+
+
+# Module-level client proxy
+client = _LazyClient()
 
 # Model helper for backwards compatibility and tests
 _model = None
@@ -57,11 +74,14 @@ def get_model():
     return _model
 
 
-def search(query: str, top_k: int = 5):
+def search(query: str, top_k: int = 5, collection_name: Optional[str] = None):
     """
     Search Qdrant for chunks relevant to the user's query.
+    Supports explicitly supplied collection_name with fallback to settings.
     Handles non-existent collection or connection issues gracefully.
     """
+    target_collection = collection_name or settings.qdrant_collection
+    active_client = client if client is not None else get_client()
     model = get_model()
 
     # Convert query into vector
@@ -73,27 +93,27 @@ def search(query: str, top_k: int = 5):
 
     try:
         try:
-            collections_resp = client.get_collections()
+            collections_resp = active_client.get_collections()
             if hasattr(collections_resp, "collections") and collections_resp.collections:
                 existing_names = [getattr(c, "name", None) for c in collections_resp.collections]
                 existing_names = [n for n in existing_names if isinstance(n, str)]
-                if existing_names and QDRANT_COLLECTION not in existing_names:
+                if existing_names and target_collection not in existing_names:
                     return []
         except Exception:
             pass
 
         # Search Qdrant
         try:
-            results = client.query_points(
-                collection_name=QDRANT_COLLECTION,
+            results = active_client.query_points(
+                collection_name=target_collection,
                 query=query_vector,
                 limit=top_k,
                 with_payload=True,
             )
             return results.points if hasattr(results, "points") else results
         except AttributeError:
-            results = client.search(
-                collection_name=QDRANT_COLLECTION,
+            results = active_client.search(
+                collection_name=target_collection,
                 query_vector=query_vector,
                 limit=top_k,
                 with_payload=True,

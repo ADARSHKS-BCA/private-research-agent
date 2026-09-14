@@ -8,6 +8,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.config import settings
+from app.agent.runner import run_agent_research
 from app.ingestion.pipeline import ingest_url
 from app.ingestion.qdrant_store import QdrantStore
 from app.research_pipeline import run_research
@@ -43,6 +44,8 @@ def main():
     parser.add_argument("--status", action="store_true", help="Show system and database status")
     parser.add_argument("--urls", type=int, help="Number of URLs to search and scrape", default=4)
     parser.add_argument("--top_k", type=int, help="Number of chunks to retrieve for synthesis", default=4)
+    parser.add_argument("--max-iterations", type=int, help="Maximum research iterations", default=3)
+    parser.add_argument("--linear", action="store_true", help="Use linear 1-pass pipeline instead of autonomous agent")
 
     args = parser.parse_args()
 
@@ -61,14 +64,17 @@ def main():
     elif args.research or args.question:
         q = args.research or args.question
         try:
-            run_research(question=q, num_urls=args.urls, top_k_retrieval=args.top_k, stream=True)
+            if args.linear:
+                run_research(question=q, num_urls=args.urls, top_k_retrieval=args.top_k, stream=True)
+            else:
+                run_agent_research(question=q, max_iterations=args.max_iterations)
         except Exception as e:
-            print(f"\n[Error] Research pipeline failed: {e}\n", file=sys.stderr)
+            print(f"\n[Error] Research execution failed: {e}\n", file=sys.stderr)
             sys.exit(1)
     else:
         # Default: Interactive Research Session
         print("=" * 70)
-        print(f"  {settings.app_name} - Dynamic Research Engine")
+        print(f"  {settings.app_name} - Autonomous LangGraph Research Engine")
         print("  (Type 'quit', 'exit', 'bye', or 'stop' to end the session)")
         print("=" * 70)
 
@@ -81,7 +87,10 @@ def main():
                     print("\nEnding session. Goodbye!\n")
                     break
 
-                run_research(question=user_q, num_urls=args.urls, top_k_retrieval=args.top_k, stream=True)
+                if args.linear:
+                    run_research(question=user_q, num_urls=args.urls, top_k_retrieval=args.top_k, stream=True)
+                else:
+                    run_agent_research(question=user_q, max_iterations=args.max_iterations)
             except (KeyboardInterrupt, EOFError):
                 print("\n\nSession interrupted. Goodbye!\n")
                 break

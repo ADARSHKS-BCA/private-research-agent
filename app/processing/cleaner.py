@@ -26,8 +26,8 @@ class ProcessedDocument:
     url: str
     title: str
     cleaned_markdown: str
-    raw_markdown: str
-    domain: str
+    raw_markdown: str = ""
+    domain: str = ""
     source_type: str = "web"
     content_hash: str = ""
     crawled_at: str = ""
@@ -36,8 +36,17 @@ class ProcessedDocument:
     processed_file_path: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def markdown(self) -> str:
+        """Alias for backward compatibility with CleanedDocument."""
+        return self.cleaned_markdown
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+
+# Alias for backward compatibility
+CleanedDocument = ProcessedDocument
 
 
 # Web boilerplate patterns
@@ -122,7 +131,7 @@ def clean_markdown(raw_text: str) -> str:
 
 
 def process_scraped_document(
-    scraped_doc: ScrapedWebDocument,
+    scraped_doc: Any,
     raw_dir: Optional[Path] = None,
     processed_dir: Optional[Path] = None,
 ) -> Optional[ProcessedDocument]:
@@ -130,7 +139,9 @@ def process_scraped_document(
     Process a single scraped web document: clean, generate metadata, save files.
     Returns None if document is empty or scraping failed.
     """
-    if not scraped_doc.success or not scraped_doc.markdown.strip():
+    is_success = getattr(scraped_doc, "success", True)
+    raw_content = getattr(scraped_doc, "markdown", "") or ""
+    if not is_success or not raw_content.strip():
         return None
 
     save_raw = raw_dir or settings.data_raw_dir
@@ -138,51 +149,61 @@ def process_scraped_document(
     save_raw.mkdir(parents=True, exist_ok=True)
     save_processed.mkdir(parents=True, exist_ok=True)
 
-    document_id = generate_document_id(scraped_doc.url)
-    cleaned_text = clean_markdown(scraped_doc.markdown)
+    url = getattr(scraped_doc, "url", "")
+    title = getattr(scraped_doc, "title", "Untitled")
+    domain = getattr(scraped_doc, "domain", "")
+    description = getattr(scraped_doc, "description", "")
+    crawled_at = getattr(scraped_doc, "crawled_at", "")
+    doc_meta = getattr(scraped_doc, "metadata", {}) or {}
+
+    document_id = getattr(scraped_doc, "document_id", None) or generate_document_id(url)
+    cleaned_text = clean_markdown(raw_content)
 
     if not cleaned_text:
         return None
 
     content_hash = calculate_content_hash(cleaned_text)
 
-    # Save raw document
-    raw_file_path = save_raw / f"{document_id}.md"
-    raw_file_path.write_text(scraped_doc.markdown, encoding="utf-8")
+    # Save raw document if not already saved
+    raw_file_path = getattr(scraped_doc, "raw_file_path", None)
+    if not raw_file_path:
+        raw_out = save_raw / f"{document_id}.md"
+        raw_out.write_text(raw_content, encoding="utf-8")
+        raw_file_path = str(raw_out)
 
     # Save processed document
     processed_file_path = save_processed / f"{document_id}.md"
     processed_file_path.write_text(cleaned_text, encoding="utf-8")
 
     created_at = datetime.now(timezone.utc).isoformat()
-    crawled_at = scraped_doc.crawled_at or created_at
+    crawled_at = crawled_at or created_at
 
     metadata = {
-        **scraped_doc.metadata,
-        "raw_char_count": len(scraped_doc.markdown),
+        **doc_meta,
+        "raw_char_count": len(raw_content),
         "cleaned_char_count": len(cleaned_text),
-        "description": scraped_doc.description,
+        "description": description,
     }
 
     return ProcessedDocument(
         document_id=document_id,
-        url=scraped_doc.url,
-        title=scraped_doc.title,
+        url=url,
+        title=title,
         cleaned_markdown=cleaned_text,
-        raw_markdown=scraped_doc.markdown,
-        domain=scraped_doc.domain,
-        source_type="web",
+        raw_markdown=raw_content,
+        domain=domain,
+        source_type=getattr(scraped_doc, "source_type", "web"),
         content_hash=content_hash,
         crawled_at=crawled_at,
         created_at=created_at,
-        raw_file_path=str(raw_file_path),
+        raw_file_path=raw_file_path,
         processed_file_path=str(processed_file_path),
         metadata=metadata,
     )
 
 
 def process_scraped_documents(
-    scraped_docs: List[ScrapedWebDocument],
+    scraped_docs: List[Any],
     raw_dir: Optional[Path] = None,
     processed_dir: Optional[Path] = None,
 ) -> List[ProcessedDocument]:
@@ -194,11 +215,13 @@ def process_scraped_documents(
     seen_hashes: Set[str] = set()
 
     for doc in scraped_docs:
-        if not doc.success or not doc.url:
+        success = getattr(doc, "success", True)
+        url = getattr(doc, "url", "")
+        if not success or not url:
             continue
 
-        if doc.url.lower() in seen_urls:
-            logger.info(f"Skipping duplicate URL: {doc.url}")
+        if url.lower() in seen_urls:
+            logger.info(f"Skipping duplicate URL: {url}")
             continue
 
         processed_doc = process_scraped_document(doc, raw_dir=raw_dir, processed_dir=processed_dir)
@@ -206,11 +229,43 @@ def process_scraped_documents(
             continue
 
         if processed_doc.content_hash in seen_hashes:
-            logger.info(f"Skipping duplicate content hash for: {doc.url}")
+            logger.info(f"Skipping duplicate content hash for: {url}")
             continue
 
-        seen_urls.add(doc.url.lower())
+        seen_urls.add(url.lower())
         seen_hashes.add(processed_doc.content_hash)
         processed.append(processed_doc)
 
     return processed
+
+
+class Cleaner:
+    """
+    Canonical Cleaner class interface for pipeline integration and backward compatibility.
+    """
+    def __init__(self, save_dir: Optional[Path] = None):
+        self.save_dir = Path(save_dir or settings.data_processed_dir)
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+
+    def clean_text(self, text: str) -> str:
+        return clean_markdown(text)
+
+    def clean_document(self, doc: Any) -> ProcessedDocument:
+        res = process_scraped_document(doc, processed_dir=self.save_dir)
+        if res is None:
+            # Fallback if empty
+            raw = getattr(doc, "markdown", "")
+            return ProcessedDocument(
+                document_id=getattr(doc, "document_id", "doc_fallback"),
+                url=getattr(doc, "url", ""),
+                title=getattr(doc, "title", "Untitled"),
+                cleaned_markdown=raw,
+                raw_markdown=raw,
+                domain=getattr(doc, "domain", ""),
+            )
+        return res
+
+
+def clean_document(doc: Any) -> ProcessedDocument:
+    cleaner = Cleaner()
+    return cleaner.clean_document(doc)

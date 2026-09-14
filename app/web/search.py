@@ -68,9 +68,16 @@ def search_web(query: str, limit: int = 5) -> List[Dict[str, Any]]:
     if not clean_query:
         return []
 
-    api_key = os.getenv("FIRECRAWL_API_KEY")
+    api_key = os.getenv("FIRECRAWL_API_KEY") or settings.firecrawl_api_key
+
+    # If Firecrawl is explicitly not configured, use DuckDuckGo fallback directly
     if not api_key:
-        raise ValueError("FIRECRAWL_API_KEY is not set. Please add it to your .env file.")
+        try:
+            from app.web.search_providers import DuckDuckGoSearchProvider
+            ddg = DuckDuckGoSearchProvider()
+            return ddg.search(clean_query, limit=limit)
+        except Exception as e:
+            return []
 
     items: List[Any] = []
 
@@ -109,6 +116,15 @@ def search_web(query: str, limit: int = 5) -> List[Dict[str, Any]]:
     # Strategy 2: Direct REST API Fallback
     if not items:
         items = search_with_rest_api(clean_query, api_key=api_key, limit=limit)
+
+    # Strategy 3: DuckDuckGo Fallback if Firecrawl returned no items
+    if not items:
+        try:
+            from app.web.search_providers import DuckDuckGoSearchProvider
+            ddg = DuckDuckGoSearchProvider()
+            return ddg.search(clean_query, limit=limit)
+        except Exception:
+            pass
 
     normalized_results: List[Dict[str, Any]] = []
 

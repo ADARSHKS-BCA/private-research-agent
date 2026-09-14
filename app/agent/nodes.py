@@ -8,15 +8,17 @@ Reuses existing pipeline modules:
 - Structure-Aware Chunker (app.ingestion.chunker)
 - Local BGE-M3 Embeddings (app.ingestion.embedder)
 - Qdrant Vector Store (app.ingestion.qdrant_store)
-- Dense Retrieval (app.retrieval.search)
-- Grounded Groq Generation (app.rag.answer)
+- Dense & Hybrid Retrieval (app.retrieval.hybrid, app.retrieval.search)
+- CPU Reranker (app.retrieval.reranker)
+- Grounded Generation (app.rag.answer)
 - Citation Validation (app.rag.citations)
 """
 
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional
+import threading
+from typing import Any, Callable, Dict, List, Optional
 
 from app.agent.prompts import (
     ANSWER_SYSTEM_PROMPT,
@@ -38,11 +40,26 @@ from app.rag.citations import (
     format_prompt_context_with_sources,
     validate_citations as validate_citations_func,
 )
+from app.retrieval.hybrid import hybrid_search
+from app.retrieval.reranker import rerank_evidence
 from app.retrieval.search import search
 from app.web.scraper import scrape_search_results
 from app.web.search import search_web
 
 logger = logging.getLogger(__name__)
+
+# Thread-local token callback registry for real streaming
+_thread_token_callbacks = threading.local()
+
+
+def set_token_callback(callback: Optional[Callable[[str], None]]) -> None:
+    """Set the token callback for the current thread."""
+    _thread_token_callbacks.callback = callback
+
+
+def get_token_callback() -> Optional[Callable[[str], None]]:
+    """Retrieve the token callback for the current thread."""
+    return getattr(_thread_token_callbacks, "callback", None)
 
 
 def _call_llm(
@@ -50,10 +67,16 @@ def _call_llm(
     system_prompt: str = "You are a helpful research assistant.",
     temperature: float = 0.2,
     max_tokens: int = 600,
+    stream: bool = False,
+    token_callback: Optional[Callable[[str], None]] = None,
 ) -> str:
     """
-    Invoke Groq (or local Ollama fallback) using existing project configuration.
+    Invoke Groq (or local Ollama fallback) with optional streaming token callback.
     """
+    if token_callback is None:
+        token_callback = get_token_callback()
+
+    should_stream = stream and (token_callback is not None)
     api_key = settings.groq_api_key
     provider = (settings.llm_provider or "groq").lower()
 
@@ -61,8 +84,8 @@ def _call_llm(
         try:
             from groq import Groq
             client = Groq(api_key=api_key)
-            target_model = settings.groq_model or "openai/gpt-oss-20b"
-            
+            target_model = settings.groq_model or "llama-3.3-70b-versatile"
+
             # Verify model availability
             available_models = get_groq_available_models(client)
             candidate_models: List[str] = []
@@ -91,17 +114,37 @@ def _call_llm(
             last_err = None
             for model_id in candidate_models:
                 try:
-                    completion = client.chat.completions.create(
-                        model=model_id,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": prompt},
-                        ],
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        stream=False,
-                    )
-                    return completion.choices[0].message.content.strip()
+                    if should_stream:
+                        completion = client.chat.completions.create(
+                            model=model_id,
+                            messages=[
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": prompt},
+                            ],
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            stream=True,
+                        )
+                        collected_chunks = []
+                        for chunk in completion:
+                            delta = chunk.choices[0].delta.content or ""
+                            if delta:
+                                collected_chunks.append(delta)
+                                if token_callback:
+                                    token_callback(delta)
+                        return "".join(collected_chunks).strip()
+                    else:
+                        completion = client.chat.completions.create(
+                            model=model_id,
+                            messages=[
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": prompt},
+                            ],
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            stream=False,
+                        )
+                        return completion.choices[0].message.content.strip()
                 except Exception as ex:
                     last_err = ex
                     continue
@@ -115,16 +158,35 @@ def _call_llm(
         import ollama
         host = settings.ollama_base_url or "http://localhost:11434"
         client = ollama.Client(host=host)
-        chosen_model = settings.ollama_model or "qwen3:4b"
-        resp = client.chat(
-            model=chosen_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt},
-            ],
-            options={"temperature": temperature, "num_predict": max_tokens},
-        )
-        return resp["message"]["content"].strip()
+        chosen_model = settings.ollama_model or "qwen2.5:3b"
+        if should_stream:
+            resp = client.chat(
+                model=chosen_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+                options={"temperature": temperature, "num_predict": max_tokens},
+                stream=True,
+            )
+            collected_chunks = []
+            for chunk in resp:
+                delta = chunk.get("message", {}).get("content", "")
+                if delta:
+                    collected_chunks.append(delta)
+                    if token_callback:
+                        token_callback(delta)
+            return "".join(collected_chunks).strip()
+        else:
+            resp = client.chat(
+                model=chosen_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+                options={"temperature": temperature, "num_predict": max_tokens},
+            )
+            return resp["message"]["content"].strip()
     except Exception as e:
         logger.error(f"LLM call failed on both Groq and Ollama: {e}")
         return ""
@@ -172,11 +234,13 @@ def plan_research(state: ResearchState) -> Dict[str, Any]:
     """
     Analyze the question and generate 1-3 targeted search queries.
     If subsequent iteration, generate follow-up queries based on missing evidence.
+    Conditioned on chat_history if available.
     """
     question = state.get("question", "")
     iteration = state.get("research_iteration", 1)
     previous_queries = state.get("search_queries", [])
     retrieved_docs = state.get("retrieved_documents", [])
+    chat_history = state.get("chat_history")
 
     # Format brief evidence summary for follow-up iterations
     evidence_summary = ""
@@ -194,6 +258,7 @@ def plan_research(state: ResearchState) -> Dict[str, Any]:
         iteration=iteration,
         previous_queries=previous_queries,
         evidence_summary=evidence_summary,
+        chat_history=chat_history,
     )
 
     llm_resp = _call_llm(
@@ -241,7 +306,7 @@ def plan_research(state: ResearchState) -> Dict[str, Any]:
 # =====================================================================
 def search_web_node(state: ResearchState) -> Dict[str, Any]:
     """
-    Execute web search using the existing Firecrawl implementation.
+    Execute web search using configured provider with DuckDuckGo fallback.
     Deduplicates URLs across iterations.
     """
     search_queries = state.get("search_queries", [])
@@ -251,7 +316,6 @@ def search_web_node(state: ResearchState) -> Dict[str, Any]:
     seen_urls = {r.get("url") for r in existing_results if isinstance(r, dict) and r.get("url")}
     new_results: List[Dict[str, Any]] = []
 
-    # Search each recent query (limit 3-4 results per query)
     # Focus on queries generated in current iteration (up to last 3)
     queries_to_run = search_queries[-3:] if search_queries else [state.get("question", "")]
 
@@ -282,8 +346,8 @@ def search_web_node(state: ResearchState) -> Dict[str, Any]:
 # =====================================================================
 def scrape_sources(state: ResearchState) -> Dict[str, Any]:
     """
-    Scrape discovered URLs using the existing Firecrawl scraper.
-    Gracefully handles failures per URL.
+    Scrape discovered URLs using parallel scraper with retries.
+    Tracks newly_scraped_documents for incremental processing.
     """
     search_results = state.get("search_results", [])
     existing_scraped = state.get("scraped_documents", [])
@@ -304,6 +368,7 @@ def scrape_sources(state: ResearchState) -> Dict[str, Any]:
         print("[SCRAPE] No new URLs to scrape.", flush=True)
         return {
             "scraped_documents": existing_scraped,
+            "newly_scraped_documents": [],
             "errors": errors,
         }
 
@@ -321,6 +386,7 @@ def scrape_sources(state: ResearchState) -> Dict[str, Any]:
     all_scraped = existing_scraped + newly_scraped
     return {
         "scraped_documents": all_scraped,
+        "newly_scraped_documents": newly_scraped,
         "errors": errors,
     }
 
@@ -330,32 +396,48 @@ def scrape_sources(state: ResearchState) -> Dict[str, Any]:
 # =====================================================================
 def process_documents(state: ResearchState) -> Dict[str, Any]:
     """
-    Clean scraped documents, attach metadata, and chunk using existing modules.
+    Clean scraped documents and chunk text.
+    Incrementally processes only newly_scraped_documents to avoid redundant work.
     """
-    scraped_docs = state.get("scraped_documents", [])
+    existing_cleaned = list(state.get("cleaned_documents", []))
+    existing_chunks = list(state.get("chunks", []))
+    newly_scraped = state.get("newly_scraped_documents")
     errors = list(state.get("errors", []))
 
-    successful_scrapes = [d for d in scraped_docs if getattr(d, "success", False)]
+    # Incremental: process newly scraped docs if tracked, otherwise process all successful scrapes
+    if newly_scraped is not None:
+        docs_to_process = [d for d in newly_scraped if getattr(d, "success", False)]
+    else:
+        docs_to_process = [d for d in state.get("scraped_documents", []) if getattr(d, "success", False)]
 
-    try:
-        processed_docs = process_scraped_documents(successful_scrapes)
-        chunks = chunk_documents(
-            processed_docs,
-            chunk_size=settings.chunk_size,
-            chunk_overlap=settings.chunk_overlap,
-        )
-    except Exception as e:
-        err_msg = f"Document processing/chunking failed: {e}"
-        logger.warning(err_msg)
-        errors.append(err_msg)
-        processed_docs = []
-        chunks = []
+    new_processed_docs = []
+    new_chunks = []
 
-    print(f"[PROCESS] Created {len(chunks)} chunks from {len(processed_docs)} cleaned documents", flush=True)
+    if docs_to_process:
+        try:
+            new_processed_docs = process_scraped_documents(docs_to_process)
+            new_chunks = chunk_documents(
+                new_processed_docs,
+                chunk_size=settings.chunk_size,
+                chunk_overlap=settings.chunk_overlap,
+            )
+        except Exception as e:
+            err_msg = f"Document processing/chunking failed: {e}"
+            logger.warning(err_msg)
+            errors.append(err_msg)
+
+    all_cleaned = existing_cleaned + new_processed_docs
+    all_chunks = existing_chunks + new_chunks
+    print(
+        f"[PROCESS] Created {len(new_chunks)} new chunks "
+        f"(Total: {len(all_chunks)} chunks from {len(all_cleaned)} cleaned documents)",
+        flush=True,
+    )
 
     return {
-        "cleaned_documents": processed_docs,
-        "chunks": chunks,
+        "cleaned_documents": all_cleaned,
+        "chunks": all_chunks,
+        "new_chunks": new_chunks,
         "errors": errors,
     }
 
@@ -366,20 +448,22 @@ def process_documents(state: ResearchState) -> Dict[str, Any]:
 def index_documents(state: ResearchState) -> Dict[str, Any]:
     """
     Generate local dense embeddings (BGE-M3) and store in Qdrant.
+    Only embeds new_chunks incrementally to eliminate quadratic work.
     """
-    chunks = state.get("chunks", [])
+    new_chunks = state.get("new_chunks")
+    chunks_to_index = new_chunks if new_chunks is not None else state.get("chunks", [])
     errors = list(state.get("errors", []))
 
-    if not chunks:
-        print("[INDEX] No chunks to index.", flush=True)
+    if not chunks_to_index:
+        print("[INDEX] No new chunks to index.", flush=True)
         return {"errors": errors}
 
     try:
         embedder = get_embedder(model_name=settings.embedding_model)
-        embeddings = embedder.embed_chunks(chunks)
+        embeddings = embedder.embed_chunks(chunks_to_index)
         store = QdrantStore(collection_name=settings.qdrant_collection)
-        stored_count = store.upsert_chunks(chunks=chunks, embeddings=embeddings)
-        print(f"[INDEX] Stored {stored_count} chunks in Qdrant", flush=True)
+        stored_count = store.upsert_chunks(chunks=chunks_to_index, embeddings=embeddings)
+        print(f"[INDEX] Stored {stored_count} new chunks in Qdrant", flush=True)
     except Exception as e:
         err_msg = f"Indexing into Qdrant failed: {e}"
         logger.warning(err_msg)
@@ -395,20 +479,28 @@ def index_documents(state: ResearchState) -> Dict[str, Any]:
 # =====================================================================
 def retrieve_evidence(state: ResearchState) -> Dict[str, Any]:
     """
-    Retrieve the most relevant chunks from Qdrant for the original question.
+    Retrieve candidate evidence via Hybrid Retrieval (BGE-M3 Dense + BM25 Lexical)
+    and refine with CPU Cross-Encoder reranking.
     """
     question = state.get("question", "")
     errors = list(state.get("errors", []))
 
     retrieved: List[Any] = []
     try:
-        retrieved = search(question, top_k=8)
+        # 1. Hybrid Retrieval
+        candidates = hybrid_search(query=question, top_k=settings.hybrid_top_k)
+        # 2. CPU Reranking
+        retrieved = rerank_evidence(query=question, candidates=candidates, top_k=settings.reranker_top_k)
     except Exception as e:
-        err_msg = f"Qdrant retrieval search error: {e}"
+        err_msg = f"Hybrid retrieval / reranking error: {e}"
         logger.warning(err_msg)
         errors.append(err_msg)
+        try:
+            retrieved = search(question, top_k=8)
+        except Exception as ex2:
+            errors.append(f"Dense search fallback error: {ex2}")
 
-    print(f"[RETRIEVE] Retrieved {len(retrieved)} chunks from Qdrant", flush=True)
+    print(f"[RETRIEVE] Retrieved & reranked {len(retrieved)} evidence chunks", flush=True)
 
     return {
         "retrieved_documents": retrieved,
@@ -422,7 +514,7 @@ def retrieve_evidence(state: ResearchState) -> Dict[str, Any]:
 def evaluate_evidence(state: ResearchState) -> Dict[str, Any]:
     """
     Assess whether retrieved evidence is sufficient to answer the research question.
-    Enforces maximum research iteration bounds to guarantee termination.
+    Enforces maximum research iteration bounds and relevance thresholds.
     """
     question = state.get("question", "")
     retrieved = state.get("retrieved_documents", [])
@@ -440,6 +532,19 @@ def evaluate_evidence(state: ResearchState) -> Dict[str, Any]:
     # Edge case 2: No chunks retrieved at all -> insufficient
     if not retrieved:
         print(f"[EVALUATE] Evidence sufficient: False (No chunks retrieved. Iteration {iteration}/{max_iterations})", flush=True)
+        return {
+            "evidence_sufficient": False,
+            "research_iteration": iteration + 1,
+        }
+
+    # Edge case 3: Check relevance scores against threshold if available
+    best_score = max([
+        float(getattr(c, "rerank_score", None) or getattr(c, "hybrid_score", None) or getattr(c, "score", 0.0) or 0.0)
+        for c in retrieved
+    ], default=0.0)
+
+    if best_score > 0.0 and best_score < settings.relevance_threshold:
+        print(f"[EVALUATE] Best score {best_score:.2f} below threshold {settings.relevance_threshold}. Iteration {iteration}/{max_iterations}.", flush=True)
         return {
             "evidence_sufficient": False,
             "research_iteration": iteration + 1,
@@ -487,13 +592,15 @@ def evaluate_evidence(state: ResearchState) -> Dict[str, Any]:
 def generate_answer(state: ResearchState) -> Dict[str, Any]:
     """
     Synthesize a factually grounded answer citing [S1], [S2] source markers.
-    Uses Groq with openai/gpt-oss-20b.
+    Supports real-time token streaming if a callback is registered.
     """
     question = state.get("question", "")
     retrieved = state.get("retrieved_documents", [])
     errors = list(state.get("errors", []))
 
-    print(f"[GENERATE] Generating answer with {settings.llm_provider.upper()} ({settings.groq_model if settings.llm_provider == 'groq' else settings.ollama_model})", flush=True)
+    provider_name = (settings.llm_provider or "groq").upper()
+    model_name = settings.groq_model if provider_name == "GROQ" else settings.ollama_model
+    print(f"[GENERATE] Generating answer with {provider_name} ({model_name})", flush=True)
 
     if not retrieved:
         no_info = "I don't have enough information in the provided sources to answer this question."
@@ -507,11 +614,14 @@ def generate_answer(state: ResearchState) -> Dict[str, Any]:
 
     prompt = format_answer_prompt(question=question, context=context)
 
+    token_cb = state.get("token_callback") or get_token_callback()
     answer_text = _call_llm(
         prompt=prompt,
         system_prompt=ANSWER_SYSTEM_PROMPT,
         temperature=0.2,
         max_tokens=800,
+        stream=bool(token_cb),
+        token_callback=token_cb,
     )
 
     if not answer_text.strip():

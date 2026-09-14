@@ -1,14 +1,58 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Header } from './components/Header';
 import { ChatContainer } from './components/ChatContainer';
 import { ChatInput } from './components/ChatInput';
-import { ChatMessage, ResearchStep, CitationSource, SSEStatusData, SSEDoneData } from './types/chat';
-import { streamResearch } from './services/api';
+import {
+  ChatMessage,
+  ResearchStep,
+  CitationSource,
+  SSEStatusData,
+  SSEDoneData,
+  SSEConversationData,
+} from './types/chat';
+import {
+  streamResearch,
+  uploadDocument,
+  fetchConversation,
+} from './services/api';
 
 export const App: React.FC = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [conversationId, setConversationId] = useState<string | null>(() => {
+    return localStorage.getItem('pra_conversation_id') || null;
+  });
+  const [isUploading, setIsUploading] = useState<boolean>(false);
+  const [uploadStatus, setUploadStatus] = useState<string | null>(null);
+
   const abortControllerRef = useRef<AbortController | null>(null);
+
+  // Load existing session history on initial mount if conversationId exists
+  useEffect(() => {
+    if (conversationId && messages.length === 0) {
+      fetchConversation(conversationId)
+        .then((data) => {
+          if (data && Array.isArray(data.messages) && data.messages.length > 0) {
+            const formattedMessages: ChatMessage[] = data.messages.map((m: any) => ({
+              id: m.id || `msg-${Date.now()}`,
+              role: m.role,
+              content: m.content || '',
+              steps: m.steps || [],
+              sources: m.sources || [],
+              isStreaming: false,
+              timestamp: m.timestamp || Date.now(),
+              conversationId: data.id,
+            }));
+            setMessages(formattedMessages);
+          }
+        })
+        .catch(() => {
+          // If conversation expired or not found, reset
+          localStorage.removeItem('pra_conversation_id');
+          setConversationId(null);
+        });
+    }
+  }, []);
 
   const handleSend = async (question: string) => {
     if (!question.trim() || isLoading) return;
@@ -21,6 +65,7 @@ export const App: React.FC = () => {
       role: 'user',
       content: question.trim(),
       timestamp: Date.now(),
+      conversationId: conversationId || undefined,
     };
 
     const initialAssistantMsg: ChatMessage = {
@@ -31,6 +76,7 @@ export const App: React.FC = () => {
       sources: [],
       isStreaming: true,
       timestamp: Date.now(),
+      conversationId: conversationId || undefined,
     };
 
     setMessages((prev) => [...prev, userMsg, initialAssistantMsg]);
@@ -42,6 +88,11 @@ export const App: React.FC = () => {
     await streamResearch(
       question.trim(),
       {
+        onConversation: (convData: SSEConversationData) => {
+          setConversationId(convData.conversation_id);
+          localStorage.setItem('pra_conversation_id', convData.conversation_id);
+        },
+
         onStatus: (statusData: SSEStatusData) => {
           setMessages((prev) =>
             prev.map((msg) => {
@@ -108,6 +159,10 @@ export const App: React.FC = () => {
         },
 
         onDone: (doneData: SSEDoneData) => {
+          if (doneData.conversation_id) {
+            setConversationId(doneData.conversation_id);
+            localStorage.setItem('pra_conversation_id', doneData.conversation_id);
+          }
           setMessages((prev) =>
             prev.map((msg) => {
               if (msg.id !== assistantMessageId) return msg;
@@ -137,6 +192,7 @@ export const App: React.FC = () => {
           abortControllerRef.current = null;
         },
       },
+      conversationId,
       abortController.signal
     );
   };
@@ -154,38 +210,60 @@ export const App: React.FC = () => {
 
   const handleNewChat = () => {
     handleStop();
+    setConversationId(null);
+    localStorage.removeItem('pra_conversation_id');
     setMessages([]);
   };
 
   const handleRetry = (questionToRetry: string) => {
-    if (questionToRetry) {
-      handleSend(questionToRetry);
+    if (!questionToRetry) return;
+    handleSend(questionToRetry);
+  };
+
+  const handleUploadFile = async (file: File) => {
+    try {
+      setIsUploading(true);
+      setUploadStatus(`Parsing and indexing ${file.name}...`);
+      const result = await uploadDocument(file);
+      setUploadStatus(
+        `Indexed ${result.chunks_indexed} chunks from ${file.name} into knowledge base.`
+      );
+      setTimeout(() => {
+        setUploadStatus(null);
+      }, 5000);
+    } catch (err: any) {
+      setUploadStatus(`Upload failed: ${err.message || 'Error parsing document'}`);
+      setTimeout(() => {
+        setUploadStatus(null);
+      }, 6000);
+    } finally {
+      setIsUploading(false);
     }
   };
 
   return (
-    <div className="flex flex-col h-screen w-full bg-slate-950 text-slate-100 font-sans antialiased overflow-hidden">
-      {/* App Header */}
-      <Header onNewChat={handleNewChat} disabled={isLoading} />
+    <div className="flex flex-col h-screen bg-slate-950 text-slate-100 font-sans selection:bg-indigo-500/30 selection:text-indigo-200">
+      {/* Top Header */}
+      <Header onNewChat={handleNewChat} />
 
-      {/* Main Chat Area */}
-      <main className="flex-1 flex flex-col min-h-0 relative overflow-hidden">
-        <ChatContainer
-          messages={messages}
-          isLoading={isLoading}
-          onSelectPrompt={handleSend}
-          onRetry={handleRetry}
-        />
+      {/* Main Research Chat Area */}
+      <ChatContainer
+        messages={messages}
+        isLoading={isLoading}
+        onSelectPrompt={handleSend}
+        onRetry={handleRetry}
+        conversationId={conversationId}
+      />
 
-        {/* Input Bar */}
-        <ChatInput
-          onSend={handleSend}
-          onStop={handleStop}
-          isLoading={isLoading}
-        />
-      </main>
+      {/* Bottom Chat & File Upload Bar */}
+      <ChatInput
+        onSend={handleSend}
+        onStop={handleStop}
+        onUploadFile={handleUploadFile}
+        isLoading={isLoading}
+        isUploading={isUploading}
+        uploadStatus={uploadStatus}
+      />
     </div>
   );
 };
-
-export default App;

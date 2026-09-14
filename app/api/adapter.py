@@ -2,21 +2,24 @@
 Streaming adapter for the LangGraph Autonomous Research Agent.
 
 Exposes the existing LangGraph execution as a Server-Sent Events (SSE) stream.
+Emits real-time token events directly from LLM generation without artificial delays.
 Safely extracts high-level progress status without exposing internal reasoning,
 private chain-of-thought, or system prompts.
+Persists multi-turn conversations in SQLite.
 """
 
 import asyncio
 import json
 import logging
 import queue
-import re
 import threading
 import time
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from app.agent.graph import create_research_graph
+from app.agent.nodes import set_token_callback
 from app.agent.state import ResearchState, create_initial_state
+from app.storage.conversations import get_conversation_store
 
 logger = logging.getLogger(__name__)
 
@@ -75,24 +78,13 @@ def _format_sse_event(event_type: str, data: Dict[str, Any]) -> str:
     return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-def _split_into_streaming_tokens(text: str) -> List[str]:
-    """
-    Split text into words and tokens preserving whitespace and formatting
-    for natural progressive typing.
-    """
-    if not text:
-        return []
-    # Match words, spaces, newlines, and punctuation tokens
-    tokens = re.findall(r"\S+|\s+", text)
-    return tokens
-
-
 async def stream_research_events(
     question: str,
     max_iterations: int = 3,
+    conversation_id: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """
-    Stream safe progress events, answer tokens, and validated sources
+    Stream safe progress events, real-time answer tokens, and validated sources
     from the existing LangGraph execution over SSE.
     """
     clean_q = question.strip() if question else ""
@@ -102,6 +94,20 @@ async def stream_research_events(
         return
 
     start_time = time.time()
+    store = get_conversation_store()
+
+    # Multi-turn conversation management
+    conv_id = store.create_conversation(
+        title=clean_q[:60],
+        conversation_id=conversation_id,
+    )
+    chat_history = store.get_recent_chat_history(conv_id, max_turns=5)
+
+    # Save incoming user question to persistence store
+    store.add_message(conversation_id=conv_id, role="user", content=clean_q)
+
+    # Emit conversation ID to client
+    yield _format_sse_event("conversation", {"conversation_id": conv_id})
 
     # Initial status
     yield _format_sse_event(
@@ -128,11 +134,31 @@ async def stream_research_events(
 
     event_queue: queue.Queue = queue.Queue()
     _SENTINEL = object()
+    recorded_steps: List[Dict[str, Any]] = [
+        {
+            "step": "init",
+            "title": "Understanding research question",
+            "state": "completed",
+            "details": "Initialized autonomous research workflow",
+        }
+    ]
 
     def run_graph_sync():
         try:
+            # Register thread-local token streaming callback
+            def on_token(delta: str):
+                if delta:
+                    event_queue.put(("token", delta))
+
+            set_token_callback(on_token)
+
             graph = create_research_graph()
-            initial_state = create_initial_state(question=clean_q, max_iterations=max_iterations)
+            initial_state = create_initial_state(
+                question=clean_q,
+                max_iterations=max_iterations,
+                conversation_id=conv_id,
+                chat_history=chat_history,
+            )
 
             # Stream node updates from LangGraph
             for event in graph.stream(initial_state, stream_mode="updates"):
@@ -143,6 +169,8 @@ async def stream_research_events(
             logger.exception("Error during LangGraph execution in worker thread")
             event_queue.put(("error", ex))
             event_queue.put((_SENTINEL, None))
+        finally:
+            set_token_callback(None)
 
     # Execute LangGraph in background worker thread to prevent blocking asyncio loop
     worker_thread = threading.Thread(target=run_graph_sync, daemon=True)
@@ -150,14 +178,15 @@ async def stream_research_events(
 
     answer_text = ""
     validated_sources: List[Dict[str, Any]] = []
+    tokens_streamed_count = 0
 
     try:
         while True:
             # Check for events from worker thread without busy-waiting
             try:
-                item_type, item_data = await asyncio.to_thread(event_queue.get, timeout=0.1)
+                item_type, item_data = await asyncio.to_thread(event_queue.get, timeout=0.08)
             except queue.Empty:
-                await asyncio.sleep(0.02)
+                await asyncio.sleep(0.01)
                 continue
 
             if item_type is _SENTINEL:
@@ -171,6 +200,12 @@ async def stream_research_events(
                 )
                 break
 
+            # Handle genuine streaming token directly from LLM
+            if item_type == "token":
+                tokens_streamed_count += 1
+                yield _format_sse_event("token", {"text": item_data})
+                continue
+
             if item_type == "node_update":
                 # item_data is a dict of {node_name: state_update}
                 for node_name, state_update in item_data.items():
@@ -182,7 +217,11 @@ async def stream_research_events(
                     details = ""
                     if node_name == "plan_research":
                         queries = state_update.get("search_queries", [])
-                        details = f"Generated {len(queries)} search query" if len(queries) == 1 else f"Generated {len(queries)} search queries"
+                        details = (
+                            f"Generated {len(queries)} search query"
+                            if len(queries) == 1
+                            else f"Generated {len(queries)} search queries"
+                        )
                     elif node_name == "search_web":
                         results = state_update.get("search_results", [])
                         details = f"Discovered {len(results)} relevant web sources"
@@ -213,16 +252,21 @@ async def stream_research_events(
                         validated_sources = sources_list
                         details = f"Verified {len(sources_list)} source citations"
 
+                    step_info = {
+                        "step": node_name,
+                        "title": config["title"],
+                        "state": "completed",
+                        "details": details,
+                    }
+                    recorded_steps.append(step_info)
+
                     # Emit completion status for current node
-                    yield _format_sse_event(
-                        "status",
-                        {
-                            "step": node_name,
-                            "title": config["title"],
-                            "state": "completed",
-                            "details": details,
-                        },
-                    )
+                    yield _format_sse_event("status", step_info)
+
+                    # If model did not stream tokens for some reason (e.g. non-streaming fallback),
+                    # emit the answer in batch so frontend always gets text
+                    if node_name == "generate_answer" and tokens_streamed_count == 0 and answer_text:
+                        yield _format_sse_event("token", {"text": answer_text})
 
                     # Emit 'running' status for expected next node
                     next_node = NEXT_STEP_MAP.get(node_name)
@@ -262,14 +306,6 @@ async def stream_research_events(
                             },
                         )
 
-                    # When answer is generated, stream tokens progressively
-                    if node_name == "generate_answer" and answer_text:
-                        tokens = _split_into_streaming_tokens(answer_text)
-                        for token in tokens:
-                            yield _format_sse_event("token", {"text": token})
-                            # Natural progressive typing delay
-                            await asyncio.sleep(0.012)
-
                     # When citations are validated, emit sources event
                     if node_name == "validate_citations":
                         yield _format_sse_event(
@@ -277,8 +313,17 @@ async def stream_research_events(
                             {"sources": validated_sources},
                         )
 
+        # Save assistant answer, reasoning steps, and validated sources to SQLite store
+        store.add_message(
+            conversation_id=conv_id,
+            role="assistant",
+            content=answer_text,
+            steps=recorded_steps,
+            sources=validated_sources,
+        )
+
         elapsed = round(time.time() - start_time, 2)
-        yield _format_sse_event("done", {"elapsed_seconds": elapsed})
+        yield _format_sse_event("done", {"elapsed_seconds": elapsed, "conversation_id": conv_id})
 
     except Exception as e:
         logger.exception(f"Unhandled error in research stream: {e}")

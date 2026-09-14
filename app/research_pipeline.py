@@ -155,7 +155,7 @@ def run_research(
     # STEP 9: Retrieve Evidence
     # ----------------------------------------------------
     print(f"[9/10] Retrieving top {top_k_retrieval} relevant evidence chunks for question...")
-    retrieved_results = search(clean_question, top_k=top_k_retrieval)
+    retrieved_results = search(clean_question, top_k=top_k_retrieval, collection_name=target_collection)
     print(f"       Retrieved {len(retrieved_results)} chunks from Qdrant.\n")
 
     # ----------------------------------------------------

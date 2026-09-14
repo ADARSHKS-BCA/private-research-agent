@@ -1,0 +1,96 @@
+[
+  {
+    "id": "eval_01",
+    "question": "What is the difference between dense retrieval and sparse BM25 retrieval in RAG?",
+    "ground_truth": "Dense retrieval uses neural embedding models to represent queries and documents as dense continuous vectors in a shared semantic embedding space, capturing semantic meaning and synonyms even when exact words differ. Sparse BM25 retrieval relies on inverted term frequencies (TF-IDF variants) to match exact keywords, acronyms, and technical terms. Hybrid RAG combines both via reciprocal rank fusion or weighted interpolation to maximize recall and precision.",
+    "key_concepts": [
+      "dense retrieval",
+      "embedding",
+      "semantic",
+      "sparse",
+      "bm25",
+      "exact keyword",
+      "hybrid",
+      "fusion"
+    ],
+    "expected_domains": [
+      "arxiv.org",
+      "pinecone.io",
+      "weaviate.io",
+      "qdrant.tech"
+    ]
+  },
+  {
+    "id": "eval_02",
+    "question": "How does cross-encoder reranking improve retrieval precision in search pipelines?",
+    "ground_truth": "Cross-encoders take both the query and candidate passage together as a single input pair into a transformer model, allowing all-to-all cross-attention across tokens from both sequences. This captures fine-grained query-document interactions that bi-encoders miss. Because cross-encoders are computationally intensive, they are typically applied as a secondary reranking step on top of a smaller candidate set (e.g. top 20-50) returned by bi-encoders.",
+    "key_concepts": [
+      "cross-encoder",
+      "cross-attention",
+      "query-document interaction",
+      "reranking",
+      "bi-encoder",
+      "precision"
+    ],
+    "expected_domains": [
+      "sbert.net",
+      "huggingface.co",
+      "arxiv.org"
+    ]
+  },
+  {
+    "id": "eval_03",
+    "question": "What are the core architectural components of an autonomous agent in LangGraph?",
+    "ground_truth": "An autonomous agent in LangGraph consists of a shared State object (TypedDict), Nodes that represent discrete Python functions or LLM tool invocations that inspect and update state, Edges that connect nodes, and Conditional Edges that route execution flow dynamically based on state evaluation (such as looping back if evidence is insufficient). The workflow compiles into a Runnable graph.",
+    "key_concepts": [
+      "state",
+      "nodes",
+      "edges",
+      "conditional edges",
+      "stategraph",
+      "runnable",
+      "routing"
+    ],
+    "expected_domains": [
+      "langchain.com",
+      "github.com",
+      "python.langchain.com"
+    ]
+  },
+  {
+    "id": "eval_04",
+    "question": "How does BGE-M3 achieve multi-lingual and multi-functionality representation?",
+    "ground_truth": "BGE-M3 (BAAI General Embedding Multi-lingual Multi-functionality Multi-granularity) supports dense retrieval, lexical/sparse multi-lingual matching, and multi-vector ColBERT-style representation. It handles over 100 languages and supports long context up to 8192 tokens.",
+    "key_concepts": [
+      "bge-m3",
+      "dense",
+      "sparse",
+      "multi-lingual",
+      "multi-vector",
+      "8192 tokens"
+    ],
+    "expected_domains": [
+      "arxiv.org",
+      "huggingface.co",
+      "github.com"
+    ]
+  },
+  {
+    "id": "eval_05",
+    "question": "What techniques prevent hallucination in retrieval-augmented generation systems?",
+    "ground_truth": "Techniques to prevent hallucination in RAG include strict grounded system prompts instructing the model to only use provided context, citation mapping and validation, source provenance checks, self-reflection/evaluator loops to verify evidence sufficiency, and cross-encoder relevance filtering.",
+    "key_concepts": [
+      "grounded prompt",
+      "citations",
+      "citation validation",
+      "evaluator loop",
+      "evidence sufficiency",
+      "relevance threshold"
+    ],
+    "expected_domains": [
+      "arxiv.org",
+      "deeplearning.ai",
+      "openai.com"
+    ]
+  }
+]

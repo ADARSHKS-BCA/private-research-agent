@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -8,15 +8,22 @@ import {
   AlertTriangle,
   RotateCcw,
   Sparkles,
+  Download,
+  ChevronDown,
+  FileText,
+  FileCode,
+  File,
 } from 'lucide-react';
 import { ChatMessage } from '../types/chat';
 import { ThinkingProcess } from './ThinkingProcess';
 import { SourcesSection } from './SourcesSection';
+import { exportResearchReport } from '../services/api';
 
 interface MessageItemProps {
   message: ChatMessage;
   onRetry?: (question: string) => void;
   isLastAssistant?: boolean;
+  conversationId?: string | null;
 }
 
 /**
@@ -62,10 +69,26 @@ export const MessageItem: React.FC<MessageItemProps> = ({
   message,
   onRetry,
   isLastAssistant = false,
+  conversationId = null,
 }) => {
   const [copied, setCopied] = useState(false);
+  const [showExportMenu, setShowExportMenu] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
+  const exportMenuRef = useRef<HTMLDivElement>(null);
 
   const isUser = message.role === 'user';
+  const targetConvId = message.conversationId || conversationId;
+
+  // Close export menu when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (exportMenuRef.current && !exportMenuRef.current.contains(event.target as Node)) {
+        setShowExportMenu(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   const handleCopy = async () => {
     if (!message.content) return;
@@ -75,6 +98,19 @@ export const MessageItem: React.FC<MessageItemProps> = ({
       setTimeout(() => setCopied(false), 2000);
     } catch (err) {
       console.error('Failed to copy text:', err);
+    }
+  };
+
+  const handleExport = async (format: 'markdown' | 'json' | 'pdf') => {
+    if (!targetConvId) return;
+    try {
+      setIsExporting(true);
+      setShowExportMenu(false);
+      await exportResearchReport(targetConvId, format);
+    } catch (err) {
+      console.error(`Export as ${format} failed:`, err);
+    } finally {
+      setIsExporting(false);
     }
   };
 
@@ -174,9 +210,56 @@ export const MessageItem: React.FC<MessageItemProps> = ({
               <SourcesSection sources={message.sources} />
             )}
 
-            {/* Action Bar (Copy button) */}
+            {/* Action Bar (Copy & Export buttons) */}
             {!message.isStreaming && message.content && (
               <div className="flex items-center justify-end gap-2 mt-4 pt-3 border-t border-slate-800/40">
+                {/* Export Dropdown */}
+                {targetConvId && (
+                  <div className="relative" ref={exportMenuRef}>
+                    <button
+                      type="button"
+                      onClick={() => setShowExportMenu((prev) => !prev)}
+                      disabled={isExporting}
+                      className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-800/60 transition-colors disabled:opacity-50"
+                      title="Export research report"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Export</span>
+                      <ChevronDown className="w-3 h-3 text-slate-500" />
+                    </button>
+
+                    {showExportMenu && (
+                      <div className="absolute right-0 bottom-full mb-1 w-44 rounded-xl bg-slate-900 border border-slate-700/80 shadow-xl py-1 z-30 backdrop-blur-md animate-fade-in">
+                        <button
+                          type="button"
+                          onClick={() => handleExport('markdown')}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-xs text-slate-200 hover:bg-slate-800 text-left transition-colors"
+                        >
+                          <FileCode className="w-3.5 h-3.5 text-indigo-400" />
+                          <span>Markdown (.md)</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleExport('json')}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-xs text-slate-200 hover:bg-slate-800 text-left transition-colors"
+                        >
+                          <FileText className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>JSON (.json)</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleExport('pdf')}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-xs text-slate-200 hover:bg-slate-800 text-left transition-colors"
+                        >
+                          <File className="w-3.5 h-3.5 text-rose-400" />
+                          <span>PDF Document (.pdf)</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Copy Button */}
                 <button
                   type="button"
                   onClick={handleCopy}

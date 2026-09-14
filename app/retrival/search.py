@@ -1,5 +1,2 @@
-# Alias to app.retrieval.search
-from app.retrieval.search import *
-
-if __name__ == "__main__":
-    main()
+# Deprecated: Misspelled alias. Use app.retrieval.search instead.
+from app.retrieval.search import *  # noqa: F401, F403

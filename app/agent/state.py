@@ -25,8 +25,10 @@ class ResearchState(TypedDict, total=False):
     search_queries: List[str]
     search_results: List[Dict[str, Any]]
     scraped_documents: List[Any]
+    newly_scraped_documents: List[Any]
     cleaned_documents: List[Any]
     chunks: List[Any]
+    new_chunks: List[Any]
     retrieved_documents: List[Any]
     evidence_sufficient: bool
     research_iteration: int
@@ -34,11 +36,15 @@ class ResearchState(TypedDict, total=False):
     answer: str
     sources: List[Dict[str, Any]]
     errors: List[str]
+    conversation_id: str
+    chat_history: List[Dict[str, str]]
 
 
 def create_initial_state(
     question: str,
     max_iterations: int = 3,
+    conversation_id: str = "",
+    chat_history: Optional[List[Dict[str, str]]] = None,
 ) -> ResearchState:
     """
     Helper function to initialize a clean ResearchState.
@@ -49,8 +55,10 @@ def create_initial_state(
         "search_queries": [],
         "search_results": [],
         "scraped_documents": [],
+        "newly_scraped_documents": [],
         "cleaned_documents": [],
         "chunks": [],
+        "new_chunks": [],
         "retrieved_documents": [],
         "evidence_sufficient": False,
         "research_iteration": 1,
@@ -58,4 +66,7 @@ def create_initial_state(
         "answer": "",
         "sources": [],
         "errors": [],
+        "conversation_id": conversation_id,
+        "chat_history": chat_history or [],
     }
+

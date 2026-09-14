@@ -84,7 +84,7 @@ def test_should_continue_when_max_iterations_reached():
     state = create_initial_state("Query")
     state["evidence_sufficient"] = False
     state["research_iteration"] = 3
-    state["max_iterations"] == 3
+    state["max_iterations"] = 3
     assert should_continue(state) == "generate_answer"
 
 

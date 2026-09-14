@@ -24,17 +24,29 @@ def format_planner_prompt(
     iteration: int = 1,
     previous_queries: List[str] = None,
     evidence_summary: str = "",
+    chat_history: List[Dict[str, str]] = None,
 ) -> str:
     """Format prompt for the research planner node."""
+    history_block = ""
+    if chat_history:
+        history_lines = []
+        for h in chat_history[-4:]:
+            role_label = "User" if h.get("role") == "user" else "Assistant"
+            content = h.get("content", "")[:200].replace("\n", " ")
+            history_lines.append(f"{role_label}: {content}")
+        if history_lines:
+            history_block = "PRIOR CONVERSATION CONTEXT:\n" + "\n".join(history_lines) + "\n\n"
+
     if iteration == 1 or not previous_queries:
-        return f"""RESEARCH QUESTION:
+        return f"""{history_block}RESEARCH QUESTION:
 {question}
 
 Generate 1 to 3 effective web search queries to find comprehensive evidence for answering this question.
+If the question is a follow-up referring to previous turns, formulate queries addressing the specific topic.
 Respond STRICTLY with a JSON array of strings:"""
 
     prev_q_str = "\n".join(f"- {q}" for q in previous_queries)
-    return f"""RESEARCH QUESTION:
+    return f"""{history_block}RESEARCH QUESTION:
 {question}
 
 PREVIOUS QUERIES ALREADY ATTEMPTED:

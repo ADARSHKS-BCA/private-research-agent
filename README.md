@@ -1,225 +1,309 @@
 # Private Research Agent 🔬
 
-A modular, privacy-first **Autonomous Research Agent** that transforms natural-language research questions into fact-grounded, citation-backed intelligence reports.
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![LangGraph](https://img.shields.io/badge/orchestration-LangGraph-orange.svg)](https://github.com/langchain-ai/langgraph)
+[![Qdrant](https://img.shields.io/badge/vector_db-Qdrant-red.svg)](https://qdrant.tech/)
+[![FastAPI](https://img.shields.io/badge/backend-FastAPI-teal.svg)](https://fastapi.tiangolo.com/)
+[![React 18](https://img.shields.io/badge/frontend-React_18-cyan.svg)](https://react.dev/)
+[![Tailwind CSS](https://img.shields.io/badge/styling-TailwindCSS-blueviolet.svg)](https://tailwindcss.com/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-The agent dynamically searches the web, scrapes and sanitizes evidence from multiple sources, generates local dense vector embeddings with zero external data leakage, indexes knowledge in a local Qdrant vector database, and synthesizes answers using high-speed LLMs with strict source verification.
+A modular, privacy-first **Autonomous Research Agent** that transforms complex natural-language research questions into fact-grounded, citation-backed intelligence reports with multi-turn conversation memory, hybrid retrieval (Dense BGE-M3 + Lexical BM25), cross-encoder reranking, and local document ingestion.
 
----
-
-## Key Highlights
-
-- **Dynamic Web Research**: Automatically searches the live web for relevant sources using Firecrawl rather than relying on stale model training data.
-- **Multi-Source Scraping & Sanitization**: Extracts clean Markdown from discovered URLs, strips web boilerplate (cookie banners, navigation links, tracking scripts), and normalizes text structure.
-- **Deterministic Provenance & Deduplication**: Computes SHA-256 content hashes and stable document IDs (`doc_<hash>`) to prevent duplicate indexing across research sessions.
-- **Structure-Aware Chunking**: Chunks documents along semantic markdown boundaries (headings, lists, code blocks, paragraphs) with configurable token targets and sliding overlap.
-- **Privacy-First Local Embeddings**: Generates 1024-dimensional dense vectors locally using `BAAI/bge-m3` via ONNX-accelerated FastEmbed (with SentenceTransformers and Ollama fallbacks). No raw document text or embeddings are sent to third-party embedding APIs.
-- **Idempotent Vector Storage**: Indexes chunk vectors, payloads, and provenance metadata in a local Qdrant vector database with automated document version replacement.
-- **Dense Vector Retrieval**: Performs cosine similarity retrieval to extract the most relevant evidence chunks for any given research query.
-- **Fast Grounded Synthesis**: Generates streaming answers using Groq Cloud (`openai/gpt-oss-20b`, `llama-3.3-70b-versatile`, `llama-3.1-8b-instant`) or a 100% offline local Ollama instance.
-- **Verified Citations**: Validates all inline source tags (`[S1]`, `[S2]`) against retrieved evidence chunks, filters out hallucinated citations, and formats a clean bibliography linking back to verified source URLs.
+The system features an autonomous **LangGraph** self-reflection loop, real-time token streaming via Server-Sent Events (SSE), zero mandatory paid dependencies (with automatic DuckDuckGo and Ollama fallbacks), and multi-format report export (Markdown, JSON, PDF).
 
 ---
 
-## Research Workflow
+## 🏛️ Architecture Overview
 
-```text
-                     [ User Research Question ]
-                                 │
-                                 ▼
-                    [ 1. Firecrawl Web Search ]
-                                 │
-                                 ▼
-                  [ 2. Discovered Research URLs ]
-                                 │
-                                 ▼
-                 [ 3. Multi-URL Web Scraping ]
-                                 │
-                                 ▼
-             [ 4. Rule-Based Cleaning & Boilerplate Strip ]
-                                 │
-                                 ▼
-           [ 5. Deterministic Document IDs & SHA-256 Hash ]
-                                 │
-                                 ▼
-              [ 6. Structure-Aware Semantic Chunking ]
-                                 │
-                                 ▼
-           [ 7. Local Vector Embeddings (BAAI/bge-m3) ]
-                                 │
-                                 ▼
-            [ 8. Idempotent Indexing in Qdrant Database ]
-                                 │
-                                 ▼
-              [ 9. Dense Vector Evidence Retrieval ]
-                                 │
-                                 ▼
-         [ 10. Grounded Answer Synthesis & Citation Validation ]
-                                 │
-                                 ▼
-               [ Verified Answer + Source Bibliography ]
+```mermaid
+flowchart TD
+    User([User Question / Document Upload]) --> Router{Input Type}
+    
+    %% Local Document Ingestion
+    Router -->|Local File: PDF / DOCX / TXT / MD| DocParser[Local Document Parser & Page Splitter]
+    DocParser --> StructureChunk[Structure-Aware Semantic Chunking]
+    StructureChunk --> BGEM3_1[Local BGE-M3 Dense Embeddings]
+    BGEM3_1 --> Qdrant[(Qdrant Vector Store)]
+
+    %% Autonomous Research Loop
+    Router -->|Research Query| LangGraph[LangGraph Autonomous Agent]
+    
+    subgraph Autonomous Research Loop
+        LangGraph --> Plan[1. Plan Research & Query Generation]
+        Plan --> Search[2. Web Search: Firecrawl / DuckDuckGo Fallback]
+        Search --> Scrape[3. Parallel Web Scraper & Cleaner]
+        Scrape --> Chunk[4. Incremental Document Chunking]
+        Chunk --> Index[5. Incremental Qdrant Vector Indexing]
+        Index --> Hybrid[6. Hybrid Retrieval: Dense + BM25 Okapi]
+        Hybrid --> Rerank[7. CPU Cross-Encoder Reranker]
+        Rerank --> Eval{8. Evaluate Evidence Sufficiency}
+        Eval -->|Insufficient & iteration < max| Plan
+        Eval -->|Sufficient or max iterations| Generate[9. Grounded Answer Synthesis with Real Streaming]
+    end
+
+    Generate --> Validate[10. Strict Citation & Source Verification]
+    Validate --> SQLite[(SQLite Conversation Store)]
+    Validate --> Output([Grounded Intelligence Report & Verified Bibliography])
+    Output --> Export[Export: Markdown / JSON / PDF]
 ```
 
 ---
 
-## Prerequisites
+## 🚀 Key Features
 
-- **Python 3.10+**
-- **Docker & Docker Compose** (for local Qdrant vector database)
-- **Firecrawl API Key** (for web search & scraping — sign up at [firecrawl.dev](https://firecrawl.dev))
-- **Groq API Key** (for ultra-fast cloud inference — sign up at [console.groq.com](https://console.groq.com)) or **Ollama** installed locally for 100% offline operation.
+- **Autonomous Multi-Step LangGraph Agent**: Dynamically formulates research queries, assesses evidence completeness, and autonomously initiates follow-up search loops if context is insufficient.
+- **Hybrid Retrieval (Dense + BM25)**: Fuses 1024-dimensional semantic search (`BAAI/bge-m3`) with in-memory lexical BM25 Okapi scoring to capture both semantic intent and exact technical terminology/acronyms.
+- **CPU Cross-Encoder Reranker**: Employs a cross-attention transformer (`cross-encoder/ms-marco-MiniLM-L-6-v2` or FlashRank) to score `(query, passage)` pairs and eliminate low-relevance candidates before synthesis.
+- **Multi-Source Web Search with Fallback**: Native Firecrawl integration paired with an automated DuckDuckGo fallback for seamless research even without external search API keys.
+- **Local Document Ingestion**: Upload `.pdf` (with page-level provenance), `.docx`, `.txt`, and `.md` files directly through the UI or API to index into the Qdrant knowledge base.
+- **Multi-Turn Conversation Memory**: Persistent SQLite storage (`data/conversations.db`) enables multi-turn follow-up research questions conditioned on session history.
+- **Real Token Streaming**: Emits true low-latency Server-Sent Events (SSE) directly from LLM generation without artificial delays or token slicing.
+- **Report Exporter**: Download comprehensive research intelligence reports formatted as Markdown (`.md`), structured JSON (`.json`), or portable PDF (`.pdf`).
+- **Standardized Evaluation Suite**: Built-in benchmark harness measuring Context Precision, Context Recall, Faithfulness, Citation Accuracy, and Latency.
+- **Modern React + Vite UI**: Sleek dark-mode interface featuring expandable thinking steps, citation badges, paperclip document upload, and export menus.
 
 ---
 
-## Getting Started
+## 📂 Project Structure
 
-### 1. Clone the Repository & Set Up Environment
+```text
+private-research-agent/
+├── app/
+│   ├── agent/                    # LangGraph autonomous research loop
+│   │   ├── graph.py              # StateGraph definition & conditional routing
+│   │   ├── nodes.py              # 9 workflow nodes with real streaming callbacks
+│   │   ├── prompts.py            # Planner, evaluator, & synthesis prompts
+│   │   ├── runner.py             # CLI runner for autonomous research
+│   │   └── state.py              # TypedDict state with multi-turn history
+│   ├── api/                      # Streaming FastAPI backend
+│   │   ├── adapter.py            # SSE streaming adapter & SQLite persistence
+│   │   └── server.py             # REST & SSE endpoints (upload, export, sessions)
+│   ├── export/                   # Research report generator
+│   │   └── exporter.py           # Markdown, JSON, and PDF report exporters
+│   ├── ingestion/                # Document parsing, chunking & vectorization
+│   │   ├── chunker.py            # Structure-aware markdown chunker
+│   │   ├── doc_parser.py         # PDF, DOCX, TXT, MD parser & indexer
+│   │   ├── embedder.py           # Local BGE-M3 embeddings (FastEmbed / ST)
+│   │   └── qdrant_store.py       # Idempotent Qdrant vector operations
+│   ├── processing/               # HTML sanitization & normalization
+│   │   └── cleaner.py            # Canonical cleaner & metadata extractor
+│   ├── retrieval/                # Advanced search & reranking
+│   │   ├── hybrid.py             # BM25Okapi + Dense vector fusion
+│   │   ├── reranker.py           # CPU Cross-Encoder / FlashRank reranker
+│   │   └── search.py             # Lazy Qdrant client proxy & dense retrieval
+│   ├── storage/                  # Multi-turn persistence
+│   │   └── conversations.py      # SQLite conversation & message store
+│   ├── web/                      # Web search & scraping
+│   │   ├── scraper.py            # Parallel web scraper with backoff
+│   │   ├── search.py             # Search coordinator with fallback
+│   │   └── search_providers.py   # Firecrawl & DuckDuckGo providers
+│   ├── config.py                 # Pydantic Settings & environment validation
+│   └── main.py                   # Main CLI entrypoint
+├── evaluation/                   # Quantitative benchmark harness
+│   ├── dataset.json              # Curated research benchmark cases
+│   ├── run_eval.py               # Evaluator measuring precision, recall, faithfulness
+│   └── README.md                 # Evaluation methodology documentation
+├── frontend/                     # Modern React 18 + Vite + TailwindCSS UI
+│   ├── src/
+│   │   ├── components/           # Chat, thinking process, upload, & export
+│   │   ├── services/             # API client & SSE stream consumer
+│   │   ├── types/                # TypeScript interfaces
+│   │   └── App.tsx               # Main application component with session memory
+│   ├── nginx.conf                # Production Nginx reverse proxy
+│   └── package.json              # Frontend dependencies & scripts
+├── tests/                        # Comprehensive unit & integration tests
+│   ├── test_agent.py             # LangGraph state & node execution
+│   ├── test_api.py               # Streaming adapter & API routes
+│   ├── test_conversations.py     # SQLite persistence CRUD
+│   ├── test_doc_parser.py        # PDF/DOCX/TXT parsing & chunking
+│   ├── test_export.py            # Markdown, JSON, PDF exporters
+│   ├── test_hybrid.py            # BM25 & dense retrieval fusion
+│   ├── test_reranker.py          # Cross-encoder reranker logic
+│   ├── test_web_scraper.py       # Parallel scraping & deduplication
+│   └── test_web_search.py        # Search provider fallback
+├── .env.example                  # Comprehensive environment template
+├── .gitignore                    # Production git ignore configuration
+├── docker-compose.yml            # Multi-container full-stack compose
+├── Dockerfile.backend            # FastAPI backend container
+├── Dockerfile.frontend           # React + Vite production build container
+├── requirements.txt              # Pinned Python dependencies
+└── README.md                     # Project documentation
+```
+
+---
+
+## ⚡ Quickstart
+
+### Option A: 1-Command Full-Stack Docker Launch (Recommended)
 
 ```bash
-# Clone repository
+# 1. Clone repository
 git clone <repository-url>
 cd private-research-agent
 
+# 2. Configure environment variables
+cp .env.example .env
+# Edit .env and supply your GROQ_API_KEY (or set LLM_PROVIDER=ollama for offline use)
+
+# 3. Launch Qdrant, Backend, and Frontend containers
+docker compose up --build
+```
+
+Access the services:
+- **Web UI:** [http://localhost:3000](http://localhost:3000)
+- **FastAPI Documentation:** [http://localhost:8000/docs](http://localhost:8000/docs)
+- **Qdrant Dashboard:** [http://localhost:6333/dashboard](http://localhost:6333/dashboard)
+
+---
+
+### Option B: Local Development Setup
+
+#### 1. Backend Setup
+
+```bash
 # Create and activate virtual environment
 python -m venv .venv
-# On Windows (PowerShell):
+
+# On Windows:
 .venv\Scripts\activate
 # On Linux / macOS:
 source .venv/bin/activate
 
-# Install dependencies
+# Install Python dependencies
 pip install -r requirements.txt
+
+# Start Qdrant vector database via Docker
+docker compose up -d qdrant
+
+# Run FastAPI backend with live reloading
+uvicorn app.api.server:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-### 2. Configure Environment Variables
-
-Create a `.env` file in the root directory based on `.env.example`:
-
-```env
-# Application Settings
-APP_NAME=Private Research Agent
-ENVIRONMENT=DEVELOPMENT
-
-# LLM Provider ("groq" for cloud speed, "ollama" for 100% local)
-LLM_PROVIDER=groq
-
-# Groq Cloud LLM Settings
-GROQ_API_KEY=your_groq_api_key_here
-GROQ_MODEL=openai/gpt-oss-20b
-
-# Ollama Local LLM Settings (if using local inference)
-OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_MODEL=qwen3:4b
-
-# Firecrawl Web Search & Scraping
-FIRECRAWL_API_KEY=your_firecrawl_api_key_here
-
-# Qdrant Vector Database
-QDRANT_HOST=localhost
-QDRANT_PORT=6333
-QDRANT_COLLECTION=research_documents
-
-# Local Embedding Model
-EMBEDDING_MODEL=BAAI/bge-m3
-
-# Chunking Configuration
-CHUNK_SIZE=800
-CHUNK_OVERLAP=100
-
-# Persistence Directories
-DATA_RAW_DIR=data/raw
-DATA_PROCESSED_DIR=data/processed
-DATA_CACHE_DIR=data/cache
-```
-
-### 3. Start Local Qdrant Instance
-
-Launch Qdrant using Docker Compose:
+#### 2. Frontend Setup
 
 ```bash
-docker compose up -d
+cd frontend
+npm install
+npm run dev
 ```
 
-Verify that Qdrant is running at `http://localhost:6333/dashboard`.
+Open [http://localhost:5173](http://localhost:5173) in your browser.
 
 ---
 
-## Usage
+## ⚙️ Configuration Reference (`.env`)
 
-### Interactive Research Session
-
-Launch the interactive research CLI to ask continuous research questions:
-
-```bash
-python app/main.py
-```
-
-```text
-======================================================================
-  Private Research Agent - Dynamic Research Engine
-  (Type 'quit', 'exit', 'bye', or 'stop' to end the session)
-======================================================================
-
-What research topic would you like to investigate? What are the latest developments in agentic RAG?
-```
-
-### Direct Single Research Query
-
-Execute a full research run directly from the command line:
-
-```bash
-python app/main.py "What are the latest developments in agentic RAG?"
-```
-
-Customize the number of search URLs and retrieved chunks:
-
-```bash
-python app/main.py "Recent breakthroughs in quantum computing" --urls 5 --top_k 5
-```
-
-### Single URL Ingestion
-
-Ingest and index a specific paper or webpage directly into Qdrant:
-
-```bash
-python app/main.py --url "https://arxiv.org/abs/2005.11401"
-```
-
-### System Health & Database Diagnostics
-
-Check connectivity to Qdrant, active LLM configuration, and existing collections:
-
-```bash
-python app/main.py --status
-```
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `LLM_PROVIDER` | `groq` | Inference backend: `groq` (cloud speed) or `ollama` (100% offline). |
+| `GROQ_API_KEY` | `""` | API key from [console.groq.com](https://console.groq.com) (free tier available). |
+| `GROQ_MODEL` | `llama-3.3-70b-versatile` | Groq model for planning, evaluation, and synthesis. |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama service endpoint for offline inference. |
+| `OLLAMA_MODEL` | `qwen2.5:3b` | Local Ollama model. |
+| `SEARCH_PROVIDER` | `firecrawl` | Primary search provider: `firecrawl` or `duckduckgo`. |
+| `FALLBACK_SEARCH_PROVIDER` | `duckduckgo` | Zero-key search fallback when primary provider is unavailable. |
+| `FIRECRAWL_API_KEY` | `""` | Optional API key from [firecrawl.dev](https://firecrawl.dev). |
+| `QDRANT_HOST` | `localhost` | Qdrant host address. |
+| `QDRANT_PORT` | `6333` | Qdrant HTTP port. |
+| `QDRANT_COLLECTION` | `research_documents` | Target vector collection name. |
+| `EMBEDDING_MODEL` | `BAAI/bge-m3` | 1024-dim local embedding model. |
+| `DENSE_WEIGHT` | `0.7` | Weight of dense semantic vector score in hybrid retrieval. |
+| `SPARSE_WEIGHT` | `0.3` | Weight of lexical BM25 Okapi score in hybrid retrieval. |
+| `RERANKER_ENABLED` | `true` | Enable/disable CPU cross-encoder reranker. |
+| `RERANKER_MODEL` | `ms-marco-MiniLM-L-6-v2` | Cross-encoder model name. |
+| `RELEVANCE_THRESHOLD` | `0.35` | Minimum relevance score to consider evidence sufficient. |
+| `MAX_RESEARCH_ITERATIONS`| `3` | Maximum autonomous search reflection loops. |
+| `SQLITE_DB_PATH` | `data/conversations.db` | Local SQLite database file for multi-turn chat history. |
 
 ---
 
-## Citation Verification & Provenance
+## 📡 API Reference
 
-To guarantee that answers remain strictly grounded in verified evidence:
+### Research & Streaming
+| Endpoint | Method | Description |
+| :--- | :--- | :--- |
+| `/api/research/stream` | `POST` | Execute autonomous research and stream SSE events (`status`, `token`, `sources`, `done`). |
+| `/api/research/stream` | `GET` | Browser-accessible SSE endpoint (`?q=...&max_iterations=3`). |
 
-1. **Structured Source IDs**: Retrieved context is supplied to the LLM with explicit tags (`[S1]`, `[S2]`).
-2. **Strict Grounding Prompting**: The system prompt instructs the model to answer exclusively based on the provided evidence and cite source tags.
-3. **Anti-Hallucination Validation**:
-   - Matches all citations in the generated response against real source IDs.
-   - Discards fabricated or out-of-range citations (e.g., `[S99]`).
-   - Suppresses citations if the model determines there is insufficient information.
-4. **Source Bibliography**: Prints the final verified list of source titles and actual URLs mapped to the citation tags.
+### Local Document Ingestion
+| Endpoint | Method | Description |
+| :--- | :--- | :--- |
+| `/api/documents/upload` | `POST` | Multipart file upload accepting `.pdf`, `.docx`, `.txt`, `.md`. Chunks, embeds, and indexes into Qdrant. |
+
+### Multi-Turn Conversations
+| Endpoint | Method | Description |
+| :--- | :--- | :--- |
+| `/api/conversations` | `GET` | List past conversation sessions with metadata. |
+| `/api/conversations/{id}` | `GET` | Retrieve full message history, thinking steps, and citations for a session. |
+| `/api/conversations/{id}` | `DELETE` | Delete a conversation session and associated records. |
+
+### Report Export
+| Endpoint | Method | Description |
+| :--- | :--- | :--- |
+| `/api/research/{id}/export` | `GET` | Export report as `markdown` (`.md`), `json` (`.json`), or `pdf` (`.pdf`). |
+
+### Health & Diagnostics
+| Endpoint | Method | Description |
+| :--- | :--- | :--- |
+| `/health`, `/api/health` | `GET` | Liveness probe and configuration parameters. |
+| `/health/ready`, `/api/health/ready` | `GET` | Readiness probe verifying Qdrant vector database and SQLite storage. |
 
 ---
 
-## Running Automated Tests
+## 🧪 Quantitative Evaluation Benchmark
 
-Run the complete test suite:
+Run the built-in evaluation suite to verify retrieval accuracy and groundedness:
+
+```bash
+# 1. Fast offline simulation (zero external network / LLM calls)
+python -m evaluation.run_eval --dataset evaluation/dataset.json --mock --output evaluation/results.json
+
+# 2. Live agent benchmark (runs full LangGraph research loop)
+python -m evaluation.run_eval --dataset evaluation/dataset.json --output evaluation/results.json
+```
+
+### Benchmark Metrics
+
+| Metric | Target | Description |
+| :--- | :--- | :--- |
+| **Context Recall** | $\ge 80\%$ | Coverage of ground-truth technical concepts across retrieved evidence. |
+| **Context Precision** | $\ge 70\%$ | Proportion of retrieved chunks that contain relevant information. |
+| **Faithfulness** | $\ge 85\%$ | Groundedness score verifying claims are supported by sources. |
+| **Citation Accuracy** | $100\%$ | Verifies all `[S1]`, `[S2]` tags map to valid, non-hallucinated sources. |
+| **Average Latency** | $< 15\text{s}$ | Total execution time from question to validated answer. |
+
+---
+
+## 🛠️ Automated Testing
+
+Run the comprehensive pytest test suite:
 
 ```bash
 pytest tests/ -v
 ```
 
+Test coverage includes:
+- **Hybrid Retrieval**: BM25Okapi scoring and dense fusion (`tests/test_hybrid.py`)
+- **Cross-Encoder**: Reranking and passthrough fallback (`tests/test_reranker.py`)
+- **Document Ingestion**: Multi-format parsing and chunking (`tests/test_doc_parser.py`)
+- **Persistence**: Multi-turn SQLite CRUD operations (`tests/test_conversations.py`)
+- **Report Exporter**: Markdown, JSON, and PDF generation (`tests/test_export.py`)
+- **Autonomous Agent**: LangGraph state transitions and loop bounds (`tests/test_agent.py`)
+- **API Server & Adapter**: SSE events and safe status mappings (`tests/test_api.py`)
+- **Web Research**: Fallback search providers and scraper backoff (`tests/test_web_search.py`, `tests/test_web_scraper.py`)
+
 ---
 
-## Security & Privacy Considerations
+## 🔒 Privacy & Security Model
 
-- **Zero Embedding Leakage**: Embeddings are computed locally on your CPU/GPU using open-source models (`BAAI/bge-m3`), preventing internal data from leaving your system during vectorization.
-- **Untrusted Web Content Isolation**: Scraped web markdown is treated as untrusted text with prompt injection guardrails to prevent untrusted webpage instructions from overriding system behavior.
-- **Local Vector Storage**: All vector indexes and chunk texts reside in your local Qdrant container.
+1. **Local Embedding Execution**: All vector embeddings are calculated on your local CPU/GPU using open-weight models (`BAAI/bge-m3`). Zero document text or vector data is transmitted to third-party embedding APIs.
+2. **Untrusted Content Sanitization**: Scraped web pages are treated strictly as untrusted text. Prompt boundaries isolate retrieved evidence to prevent prompt injection attempts.
+3. **Local Vector Storage**: All chunk payloads and vectors reside exclusively inside your local Qdrant container.
+4. **Serverless Multi-Turn Storage**: Session records and chat histories reside in a local SQLite file (`data/conversations.db`) with zero external database service requirements.
+
+---
+
+## 📄 License
+
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.

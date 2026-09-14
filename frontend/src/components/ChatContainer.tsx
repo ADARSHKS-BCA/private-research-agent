@@ -8,6 +8,7 @@ interface ChatContainerProps {
   isLoading: boolean;
   onSelectPrompt: (prompt: string) => void;
   onRetry: (question: string) => void;
+  conversationId?: string | null;
 }
 
 export const ChatContainer: React.FC<ChatContainerProps> = ({
@@ -15,6 +16,7 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({
   isLoading,
   onSelectPrompt,
   onRetry,
+  conversationId = null,
 }) => {
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -41,6 +43,7 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({
             key={message.id || index}
             message={message}
             onRetry={onRetry}
+            conversationId={conversationId}
             isLastAssistant={
               message.role === 'assistant' && index === messages.length - 1
             }

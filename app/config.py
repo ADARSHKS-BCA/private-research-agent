@@ -77,9 +77,13 @@ class Settings:
     # Relevance & Anti-Hallucination Threshold
     relevance_threshold: float = float(os.getenv("RELEVANCE_THRESHOLD", "0.35"))
     max_research_iterations: int = int(os.getenv("MAX_RESEARCH_ITERATIONS", "3"))
+    hybrid_top_k: int = int(os.getenv("HYBRID_TOP_K", "15"))
 
     # Uploads and Database
     data_uploads_dir: Path = field(
+        default_factory=lambda: PROJECT_ROOT / os.getenv("DATA_UPLOADS_DIR", "data/uploads")
+    )
+    upload_dir: Path = field(
         default_factory=lambda: PROJECT_ROOT / os.getenv("DATA_UPLOADS_DIR", "data/uploads")
     )
     sqlite_db_path: Path = field(

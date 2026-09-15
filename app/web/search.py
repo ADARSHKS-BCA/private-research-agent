@@ -14,6 +14,8 @@ if str(PROJECT_ROOT) not in sys.path:
 # Load environment variables
 load_dotenv()
 
+from app.config import settings
+
 
 def search_with_rest_api(query: str, api_key: str, limit: int = 5) -> List[Dict[str, Any]]:
     """

@@ -25,6 +25,7 @@ services:
         required: false
     volumes:
       - app_data:/app/data
+      - ./app:/app/app
     depends_on:
       - qdrant
 

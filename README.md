@@ -192,6 +192,15 @@ Open [http://localhost:5173](http://localhost:5173) in your browser.
 
 ---
 
+### Option C: 100% Free Cloud Deployment (Oracle Cloud Always Free)
+
+You can host the entire system (Qdrant + Backend + Frontend) 24/7 **completely free of cost** using Oracle Cloud's Always Free tier (4 ARM vCPUs, 24 GB RAM, 200 GB SSD).
+
+👉 **[Read the Full Oracle Cloud Free Deployment Guide](docs/ORACLE_FREE_DEPLOYMENT.md)**
+
+---
+
+
 ## ⚙️ Configuration Reference (`.env`)
 
 | Variable | Default | Description |

@@ -459,8 +459,10 @@ def index_documents(state: ResearchState) -> Dict[str, Any]:
         return {"errors": errors}
 
     try:
+        print(f"[INDEX] Generating embeddings for {len(chunks_to_index)} chunks (model: {settings.embedding_model})...", flush=True)
         embedder = get_embedder(model_name=settings.embedding_model)
         embeddings = embedder.embed_chunks(chunks_to_index)
+        print(f"[INDEX] Embeddings generated. Storing in Qdrant...", flush=True)
         store = QdrantStore(collection_name=settings.qdrant_collection)
         stored_count = store.upsert_chunks(chunks=chunks_to_index, embeddings=embeddings)
         print(f"[INDEX] Stored {stored_count} new chunks in Qdrant", flush=True)

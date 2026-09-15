@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 import sys
+from typing import Optional
 
 # Ensure project root is in sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent

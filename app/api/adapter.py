@@ -101,7 +101,7 @@ async def stream_research_events(
         title=clean_q[:60],
         conversation_id=conversation_id,
     )
-    chat_history = store.get_recent_chat_history(conv_id, max_turns=5)
+    chat_history = store.get_recent_chat_history(conv_id, window=5)
 
     # Save incoming user question to persistence store
     store.add_message(conversation_id=conv_id, role="user", content=clean_q)

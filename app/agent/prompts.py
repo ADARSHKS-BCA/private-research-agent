@@ -3,7 +3,7 @@ Prompts for the LangGraph Autonomous Research Agent.
 Enforces strict grounding, structured JSON planning, and robust evidence evaluation.
 """
 
-from typing import List
+from typing import Any, Dict, List, Optional
 
 
 PLANNER_SYSTEM_PROMPT = """You are an expert autonomous research planner.
@@ -22,9 +22,9 @@ Do NOT include explanations or markdown fences outside the JSON.
 def format_planner_prompt(
     question: str,
     iteration: int = 1,
-    previous_queries: List[str] = None,
+    previous_queries: Optional[List[str]] = None,
     evidence_summary: str = "",
-    chat_history: List[Dict[str, str]] = None,
+    chat_history: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """Format prompt for the research planner node."""
     history_block = ""
